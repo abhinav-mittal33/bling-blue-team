@@ -7,6 +7,7 @@ Uses pre-computed nightly Neo4j attributes — no traversal at query time.
 """
 import structlog
 from app.graph.queries.sink_queries import check_abandoned_sink
+from app.core.security import pseudonymize
 
 logger = structlog.get_logger()
 
@@ -31,13 +32,13 @@ def run(account_id: str) -> dict:
 
     if (account_type in _LEGIT_RETENTION_TYPES
             or kyc_occupation in _LEGIT_RETENTION_OCCUPATIONS):
-        logger.info("Sink gate: legitimacy filter explained", account_id=account_id[:8],
+        logger.info("Sink gate: legitimacy filter explained", account=pseudonymize(account_id),
                     reason="legitimate_cash_retention", account_type=account_type)
         return {"fired": False}
 
     logger.warning(
         "Sink gate fired",
-        account_id=account_id[:8],
+        account=pseudonymize(account_id),
         inflow=sink_data.get("inflow_last_30d"),
         retention=sink_data.get("retention_ratio"),
         dormant_days=sink_data.get("days_since_last_send"),

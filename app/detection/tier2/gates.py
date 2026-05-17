@@ -8,6 +8,7 @@ import structlog
 from sqlalchemy.orm import Session
 
 from app.detection.tier2 import cycle_gate, sink_gate, bipartite_gate, cash_mule_sink_gate, merchant_terminal_gate
+from app.core.security import pseudonymize
 
 logger = structlog.get_logger()
 
@@ -40,7 +41,7 @@ def run_all_gates(
         try:
             result = gate_fn()
             if result.get("fired"):
-                logger.info("Gate fired", gate=gate_name, account_id=account_id[:8])
+                logger.info("Gate fired", gate=gate_name, account=pseudonymize(account_id))
                 return result
         except Exception as exc:
             # Gate failure must not crash the pipeline — log and continue

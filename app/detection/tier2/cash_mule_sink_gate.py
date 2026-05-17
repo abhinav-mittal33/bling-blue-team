@@ -10,6 +10,7 @@ See agent_docs/gotchas.md: 'ATM transactions have no UPI device fingerprint'.
 import structlog
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+from app.core.security import pseudonymize
 
 logger = structlog.get_logger()
 
@@ -108,12 +109,12 @@ def run(account_id: str, db: Session) -> dict:
     if (account_type in _LEGIT_CASH_HEAVY_TYPES
             or kyc_occupation in _LEGIT_CASH_HEAVY_OCCUPATIONS):
         logger.info("Cash mule gate: legitimate cash-heavy account",
-                    account_id=account_id[:8], account_type=account_type)
+                    account=pseudonymize(account_id), account_type=account_type)
         return {"fired": False}
 
     logger.warning(
         "Cash mule sink gate fired",
-        account_id=account_id[:8],
+        account=pseudonymize(account_id),
         account_age_days=account_age_days,
         inflow_7d=inflow_7d,
         cash_ratio=round(cash_ratio, 3),

@@ -1,8 +1,16 @@
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 from functools import lru_cache
 
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
     # PostgreSQL
     postgres_url: str
 
@@ -53,12 +61,6 @@ class Settings(BaseSettings):
     # App
     debug: bool = False
     log_level: str = "INFO"
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
-        extra = "ignore"
 
     @property
     def valid_api_keys(self) -> set[str]:

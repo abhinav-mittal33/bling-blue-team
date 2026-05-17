@@ -7,6 +7,7 @@ Any unexplained cycle = score 1.0, action REVIEW.
 import structlog
 from app.graph.queries.cycle_queries import find_cycles, get_account_type
 from app.detection.tier2.legitimacy_filter import check_legitimacy_filters
+from app.core.security import pseudonymize
 
 logger = structlog.get_logger()
 
@@ -64,7 +65,7 @@ def run(account_id: str) -> dict:
         if not legitimacy["explained"]:
             logger.warning(
                 "Cycle gate fired",
-                account_id=account_id[:8],
+                account=pseudonymize(account_id),
                 hops=hops,
                 entry_amount=entry_amount,
                 exit_amount=exit_amount,
@@ -86,7 +87,7 @@ def run(account_id: str) -> dict:
         else:
             logger.info(
                 "Cycle gate: legitimacy filter explained",
-                account_id=account_id[:8],
+                account=pseudonymize(account_id),
                 reason=legitimacy["reason"],
             )
 

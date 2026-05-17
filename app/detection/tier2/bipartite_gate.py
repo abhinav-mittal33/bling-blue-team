@@ -6,6 +6,7 @@ Classic smurfing pattern: victims send to one aggregator account.
 """
 import structlog
 from app.graph.queries.bipartite_queries import check_bipartite_core
+from app.core.security import pseudonymize
 
 logger = structlog.get_logger()
 
@@ -32,18 +33,18 @@ def run(account_id: str) -> dict:
     # Legitimate aggregators: payroll processors, insurance companies, etc.
     if kyc_occupation in _LEGIT_AGGREGATOR_OCCUPATIONS:
         logger.info("Bipartite gate: legitimacy filter explained",
-                    account_id=account_id[:8], reason="legitimate_aggregator")
+                    account=pseudonymize(account_id), reason="legitimate_aggregator")
         return {"fired": False}
 
     # Diverse merchant with many customers is legitimate
     if is_merchant and bipartite_data.get("density", 1.0) < 0.85:
         logger.info("Bipartite gate: legitimate merchant density",
-                    account_id=account_id[:8], density=bipartite_data.get("density"))
+                    account=pseudonymize(account_id), density=bipartite_data.get("density"))
         return {"fired": False}
 
     logger.warning(
         "Bipartite gate fired",
-        account_id=account_id[:8],
+        account=pseudonymize(account_id),
         sender_count=bipartite_data.get("sender_count"),
         density=bipartite_data.get("density"),
     )
