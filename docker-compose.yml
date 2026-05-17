@@ -1,0 +1,85 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  blue-team-api:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      GRAPH_ENGINE_API_KEY: ${GRAPH_ENGINE_API_KEY}
+      INVESTIGATOR_API_KEY: ${INVESTIGATOR_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      BLOCKCHAIN_SERVICE_URL: ${BLOCKCHAIN_SERVICE_URL}
+      RED_TEAM_SERVICE_URL: ${RED_TEAM_SERVICE_URL}
+      INVESTIGATOR_DASHBOARD_URL: ${INVESTIGATOR_DASHBOARD_URL}
+      SALT: ${SALT}
+      MODEL_VERSION: ${MODEL_VERSION}
+      THRESHOLD_LOG: ${THRESHOLD_LOG:-0.38}
+      THRESHOLD_REVIEW: ${THRESHOLD_REVIEW:-0.62}
+      THRESHOLD_HIGH_RISK: ${THRESHOLD_HIGH_RISK:-0.83}
+    volumes:
+      - ./ml/models:/app/ml/models
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  celery-worker:
+    build: .
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      SALT: ${SALT}
+      MODEL_VERSION: ${MODEL_VERSION}
+    volumes:
+      - ./ml/models:/app/ml/models
+
+  # Note: Neo4j NOT included — that is the Graph Engine (teammate's service)
+  # Blue Team connects to Neo4j via NEO4J_URI environment variable
+
+volumes:
+  postgres_data:

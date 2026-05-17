@@ -1,0 +1,16 @@
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+ml/models/*.json
+ml/models/*.index
+ml/models/*.joblib
+ml/data/
+*.log
+.DS_Store
