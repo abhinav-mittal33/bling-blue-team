@@ -53,17 +53,25 @@ services:
       RED_TEAM_SERVICE_URL: ${RED_TEAM_SERVICE_URL}
       INVESTIGATOR_DASHBOARD_URL: ${INVESTIGATOR_DASHBOARD_URL}
       SALT: ${SALT}
-      MODEL_VERSION: ${MODEL_VERSION}
+      PSEUDONYMIZATION_KEY: ${PSEUDONYMIZATION_KEY}
+      MODEL_VERSION: ${MODEL_VERSION:-v1.0}
       THRESHOLD_LOG: ${THRESHOLD_LOG:-0.38}
       THRESHOLD_REVIEW: ${THRESHOLD_REVIEW:-0.62}
       THRESHOLD_HIGH_RISK: ${THRESHOLD_HIGH_RISK:-0.83}
+      ENSEMBLE_ALPHA: ${ENSEMBLE_ALPHA:-0.65}
+      GATE0_LIVE: ${GATE0_LIVE:-false}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:-}
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:-}
+      COMMITTEE_SHADOW_MODE: ${COMMITTEE_SHADOW_MODE:-true}
+      COMMITTEE_LIVE_MODE: ${COMMITTEE_LIVE_MODE:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./ml/models:/app/ml/models
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
 
   celery-worker:
     build: .
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q default,evidence,graph
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,7 +86,11 @@ services:
       NEO4J_USER: ${NEO4J_USER}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD}
       SALT: ${SALT}
-      MODEL_VERSION: ${MODEL_VERSION}
+      PSEUDONYMIZATION_KEY: ${PSEUDONYMIZATION_KEY}
+      MODEL_VERSION: ${MODEL_VERSION:-v1.0}
+      GATE0_LIVE: ${GATE0_LIVE:-false}
+      COMMITTEE_SHADOW_MODE: ${COMMITTEE_SHADOW_MODE:-true}
+      COMMITTEE_LIVE_MODE: ${COMMITTEE_LIVE_MODE:-false}
     volumes:
       - ./ml/models:/app/ml/models
 

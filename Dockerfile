@@ -12,4 +12,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Non-root user — never run as root in production
+RUN adduser --disabled-password --gecos "" appuser \
+    && mkdir -p ml/models \
+    && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
