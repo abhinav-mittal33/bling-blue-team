@@ -250,6 +250,18 @@ def _fetch_account_context(account_id: str, payee_account_id: str | None, db: Se
         {"id": account_id},
     ).scalar()
 
+    # Known contact: any prior outbound txn from this account to same payee (indexed query)
+    known_contact = False
+    if payee_account_id:
+        known_contact = db.execute(
+            text("""
+                SELECT 1 FROM transactions
+                WHERE account_id = :acct AND payee_account_id = :payee
+                LIMIT 1
+            """),
+            {"acct": account_id, "payee": payee_account_id},
+        ).fetchone() is not None
+
     if row:
         return {
             "account_age_days": row.account_age_days or 0,
@@ -257,7 +269,7 @@ def _fetch_account_context(account_id: str, payee_account_id: str | None, db: Se
             "kyc_age": row.kyc_age,
             "account_type": row.account_type,
             "avg_amount_30d": float(avg_amount or 0),
-            "payee_in_known_contacts": False,  # TODO: wire known-contacts table
+            "payee_in_known_contacts": known_contact,
             "payee_account_age_days": payee_age,
             "daily_txn_count": int(daily_count or 0),
             "has_festival_gifting_history": (festival_history or 0) > 3,
@@ -269,7 +281,7 @@ def _fetch_account_context(account_id: str, payee_account_id: str | None, db: Se
         "kyc_age": None,
         "account_type": "SAVINGS",
         "avg_amount_30d": 0.0,
-        "payee_in_known_contacts": False,
+        "payee_in_known_contacts": known_contact,
         "payee_account_age_days": payee_age,
         "daily_txn_count": 0,
         "has_festival_gifting_history": False,

@@ -111,7 +111,15 @@ def run_pipeline(
     # ── Tier 3: ML ensemble (SUSPICIOUS only, gates cleared) ──────────────────
     features = build_features(txn, db)
     # SHAP removed from hot path (P1-6) — computed async by evidence.compute_shap task
-    raw_score = tier3_committee_score(features, txn, db)
+    _ts = txn.timestamp
+    context_features = {
+        "account_type": account_type,
+        "kyc_age": float(kyc_age or 0),
+        "is_festival": bool(_ts.month == 10 or (_ts.month == 11 and _ts.day <= 15)),
+        "is_night": bool(_ts.hour >= 23 or _ts.hour < 5),
+        "daily_txn_count": float(daily_txn_count),
+    }
+    raw_score = tier3_committee_score(features, txn, db, context_features)
 
     adjusted_score, context_adjustments = apply_indian_context(
         raw_score=raw_score,

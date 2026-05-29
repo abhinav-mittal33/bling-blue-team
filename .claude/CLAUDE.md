@@ -10,7 +10,120 @@
 **MVP scope**:
 - IN: Tier 1-3 detection pipeline, fund trail reconstruction, 3 API endpoints (score / alerts / feedback), investigator feedback loop with online learning, blockchain + Red Team integration clients
 - OUT: Graph Engine (teammate builds Neo4j graph), Investigator Dashboard frontend (teammate), Blockchain layer (teammate), Red Team sandbox (teammate)
-**Status**: Active development
+**Status**: Active development — 48 approved changes in progress (see `docs/IMPLEMENTATION_PLAN.md`)
+
+---
+
+## 48 CHANGES CHECKLIST
+
+Implement STRICTLY in phase order. Read `docs/IMPLEMENTATION_PLAN.md` before touching any file.
+
+### Phase 0 — Foundation (Do First — These fix silent data bugs)
+- [x] P0-1: Redis ZSET sliding windows (fixes corrupt burst_score/velocity_ratio)
+- [x] P0-2: Replace APScheduler with Celery Beat
+- [x] P0-3: Model integrity check + SHA-256 versioning
+- [x] P0-4: Update all docs (this file + agent docs)
+
+### Phase 1 — Infrastructure
+- [x] P1-1: Neo4j circuit breaker (Tenacity + Redis fallback)
+- [x] P1-2: Celery dead letter queue
+- [x] P1-3: Redis AOF persistence + connection pool
+- [x] P1-4: Response time padding (timing oracle prevention)
+- [x] P1-5: Log injection sanitization
+- [x] P1-6: SHAP async computation + role-gate access log
+- [x] P1-7: JWT RS256 authentication (alongside X-API-Key)
+- [x] P1-8: HMAC-SHA256 PII pseudonymization
+- [x] P1-9: Per-investigator FTRL rate cap (15/day)
+- [x] P1-10: FTRL deltas logged to model_audit
+- [x] P1-11: Replace blockchain client with SHA-256 hash registry
+
+### Phase 2 — Graph Layer (Do Before Retraining)
+- [x] P2-1: Weighted Leiden replacing Louvain (sets LEIDEN_DEPLOYED=true)
+- [ ] P2-2: Heterogeneous Neo4j schema (Device + VPA nodes) — needs teammate
+- [x] P2-3: Temporal graph 30-day rolling window
+- [x] P2-4: Approximate betweenness every 2 hours (Celery Beat)
+- [x] P2-5: 5-minute micro-batch (degree, acceleration, sink_score)
+- [x] P2-6: Node2Vec 32-dim embeddings nightly → emb:{account}
+- [x] P2-7: graph_staleness_hours feature
+- [x] P2-8: Multi-hop layering time windows (1h/6h/24h/7d)
+- [x] P2-9: days_since_last_send vs days_since_last_receive split
+
+### Phase 3 — Detection Logic
+- [x] P3-1: Gate 2 D-01 two-path abandoned sink (requires P2-9)
+- [x] P3-2: Gate 0 rapid relay — LOG-ONLY pilot (GATE0_LIVE=false for 2 weeks)
+- [x] P3-3: Granular festival multipliers (3-branch logic)
+- [x] P3-4: Shell company detection in legitimacy filters
+- [x] P3-5: Micro test payment flag (real-time feature)
+- [x] P3-6: Benford's law supporting feature
+- [x] P3-7: New archetypes (hawala, crypto on-ramp, benami)
+- [x] P3-8: Multi-hop layering features in feature builder (requires P2-8)
+- [x] P3-9: Fan-in sender z-score enrichment
+- [x] P3-10: Staleness penalty multiplier (requires P2-7)
+
+### Phase 4 — Model Training (Atomic deploy with Leiden)
+- [x] P4-1: Expand training data (IEEE-CIS + ADBench + blended archetypes)
+- [x] P4-2: Retrain XGBoost with all ~100 new features (use feature_registry.py)
+- [ ] P4-3: Train HGT ensemble component (requires P2-2) — teammate-blocked
+- [x] P4-4: Platt scaling calibration on retrained XGBoost
+- [x] P4-5: Derive new thresholds on calibrated ensemble output
+- [x] P4-6: Train XGBOD second novelty layer
+- [x] P4-7: PSI drift monitoring baseline
+
+### Phase 5 — Compliance
+- [x] P5-1: FINnet 2.0 gateway stub
+- [x] P5-2: NPCI pre-settlement stub
+- [x] P5-3: DPDP Act 2023 compliance layer
+- [x] P5-4: 5-year retention + pgcrypto encryption
+- [x] P5-5: CISO notification workflow
+- [x] P5-6: OFAC + UN sanctions list integration
+- [x] P5-7: Locust load test documentation
+
+### Phase 6 — Security
+- [x] P6-1: Score jitter + canary accounts
+- [x] P6-2: Model versioning rollback API (extends P0-3)
+
+### Phase 7 — Housekeeping
+- [x] P7-1: D-03 sandbox density override
+- [x] P7-2: D-05 known issue cleanup (RESOLVED — see CRITICAL BUG section)
+
+---
+
+## CORE INVARIANTS (Never Violate)
+
+1. **Investigators stay in control at every decision point. No automated blocking. Ever.**
+2. **Isolation Forest / XGBOD result NEVER enters fraud_score. Investigators NEVER see it.**
+3. **Gate 0 (rapid relay) is LOG-ONLY until GATE0_LIVE=true is set after 2-week pilot review.**
+4. **SHAP runs on base (uncalibrated) XGBoost estimator. CalibratedClassifierCV wrapper breaks TreeExplainer.**
+5. **Leiden community features and XGBoost retrain deploy atomically. Never deploy one without the other.**
+6. **feature_registry.py is the single source of truth for feature names/order. Import it; never hardcode lists elsewhere.**
+7. **detection/pipeline.py edits require coordinator approval. It is the most interconnected file.**
+8. **Conservation in Gate 0 = total_outflow / total_inflow. NEVER amounts[-1].**
+
+---
+
+## CRITICAL BUG — RESOLVED (P7-2 / D-05)
+
+~~`nightly_batch.py` writes Redis fields: `out_degree`, `in_degree`, `hub_score`, `pagerank`~~
+~~`feature_builder.py` reads Redis expecting: `degree_centrality`, `betweenness_centrality`, `pagerank_fraud_seeded`~~
+
+**FIXED in Phase 2 (2026-05-28):** `nightly_batch.py` rewritten with Leiden community detection.
+All field names now align exactly with `ml/feature_registry.py` (the authoritative source).
+`feature_builder.py` imports from `ml/feature_registry.py`. The NaN degradation is resolved.
+
+---
+
+## CASCADE DEPENDENCIES (Read Before Changing Anything)
+
+| Change | What breaks if you do it wrong |
+|--------|-------------------------------|
+| Leiden (P2-1) | XGBoost community_id values become garbage. MUST retrain immediately after. |
+| Platt calibration (P4-4) | Old thresholds (0.38/0.62/0.83) no longer valid. Derive new ones on calibrated output. |
+| HGT ensemble (P4-3) | Thresholds change again on ensemble output. Final thresholds derived on ensemble, not individual models. |
+| New features (P2-*, P3-*) | Must be in feature_registry.py before training. Must handle missing keys (default 0.0) during transition. |
+| Redis ZSET (P0-1) | burst_score and velocity_ratio features now computed correctly. Retrain after to use clean data. |
+| SHAP async (P1-6) | Keep base estimator reference in app state. CalibratedClassifierCV wrapper must never be passed to TreeExplainer. |
+
+---
 
 ## Stack
 
@@ -21,7 +134,8 @@
 - **Frontend**: None (Blue Team is pure API — Dashboard is teammate's responsibility)
 - **Package manager**: pip (requirements.txt fully pinned)
 - **Test runner**: pytest + hypothesis
-- **Key libraries**: SQLAlchemy, Alembic, Pydantic v2, Celery, APScheduler 3.x, NetworkX 3.x, structlog, Prometheus, slowapi
+- **Key libraries**: SQLAlchemy, Alembic, Pydantic v2, Celery, Celery Beat (replaces APScheduler), NetworkX 3.x, structlog, Prometheus, slowapi
+- **New ML deps (Phase 4)**: torch-geometric (HGT), leidenalg + igraph (Leiden community), node2vec, pyod[xgbod], PyJWT (RS256)
 - **Deployment target**: Docker + Docker Compose (single `docker-compose up` starts everything)
 
 ## Folder Structure
@@ -171,9 +285,52 @@ Transactions arrive from the Graph Engine (teammate's service) via `POST /api/v1
 - **Legitimacy filters run in order, always.** After cycle gate fires: internal/treasury → KYC relationship → salary advance → all-merchant → amount <70%. Never skip. Never reorder.
 - **Audit INSERT is atomic with score response.** If audit write fails, the entire /score request fails. No silent audit skips.
 - **All SQL uses parameterized queries.** Same rule for Neo4j Cypher. No f-strings ever.
-- **PII never appears in logs.** Pseudonymize: `sha256(SALT + account_id)[:12]`.
-- **scale_pos_weight=99 in XGBoost always.** Dataset is ~1% fraud. Without it, model predicts "not fraud" for everything and achieves 99% useless accuracy.
+- **PII never appears in logs.** Pseudonymize with HMAC-SHA256 (after P1-8): `hmac.new(PSEUDONYMIZATION_KEY, account_id.encode(), sha256).hexdigest()`.
+- **scale_pos_weight computed from actual training distribution.** Recalculate after every dataset expansion. Print and update this file with new value.
 - **eval_metric='aucpr' not 'auc'.** For imbalanced data, ROC-AUC is misleading. PR-AUC is correct.
+- **feature_registry.py is the only place feature names/order are defined.** Both train.py and feature_builder.py import from it. No other file may hardcode a feature list.
+- **Gate 0 rapid relay: LOG-ONLY until GATE0_LIVE=true.** Review pilot log after 2 weeks before escalating to REVIEW.
+- **Novelty (IF + XGBOD) scores NEVER enter fraud_score or investigator queue.** novelty_queue is for developers only.
+- **Response time padding target: 55ms.** Ensures Tier 2 path (20ms) and Tier 3 path (47ms) are indistinguishable to external observers.
+- **Score jitter: ±0.01 applied BEFORE threshold decision.** This is intentional for anti-model-extraction. Cap final_score to [0.0, 1.0] after jitter.
+- **SHAP must run on base (uncalibrated) XGBoost estimator.** Never pass CalibratedClassifierCV to TreeExplainer.
+- **Leiden + XGBoost retrain deploy atomically.** Set LEIDEN_DEPLOYED=true in Redis; training pipeline reads this flag.
+
+## Current Thresholds (Update after Phase 4 retraining)
+
+| Threshold | Current (raw XGBoost) | After Phase 4 (calibrated ensemble) |
+|-----------|----------------------|--------------------------------------|
+| LOG | 0.38 | TBD after P4-5 |
+| REVIEW | 0.62 | TBD after P4-5 |
+| HIGH_RISK | 0.83 | TBD after P4-5 |
+
+**Methodology:** LOG at recall=0.95, REVIEW at recall=0.80 + precision≥0.60, HIGH_RISK at precision=0.90.
+Derive on held-out TEST set (not validation — validation used for calibration).
+
+## Current Feature Count
+
+| Source | Count | Status |
+|--------|-------|--------|
+| Graph features (Redis `feat:{account}`) | 35 | Broken — field name mismatch (Phase 2 fixes) |
+| Real-time tabular (PostgreSQL + inline) | 24 | Working |
+| New graph features (Phase 2) | ~10 | Planned |
+| New real-time features (Phase 3) | ~6 | Planned |
+| Node2Vec embeddings (Phase 2) | 32 | Planned |
+| **Total after Phase 4** | ~107 | Target |
+
+## scale_pos_weight History
+
+| Dataset | Value | Date |
+|---------|-------|------|
+| Synthetic 100K (2.7% fraud) | 37 (computed: 97300/2700) | v1.0 |
+| After IEEE-CIS + ADBench merge | TBD (recompute after P4-1) | v2.0 |
+
+## Ensemble Weights
+
+| Component | Weight | Notes |
+|-----------|--------|-------|
+| XGBoost calibrated | 0.65 (ENSEMBLE_ALPHA) | Configurable via .env |
+| HGT | 0.35 (1-ENSEMBLE_ALPHA) | Configurable via .env |
 
 ## Testing Approach
 
@@ -213,17 +370,39 @@ Transactions arrive from the Graph Engine (teammate's service) via `POST /api/v1
 | `SALT` | PII pseudonymization salt | any-long-random-string |
 | `MODEL_VERSION` | Current model version string | `v1.0` |
 
+| `JWT_PRIVATE_KEY` | RS256 private key (PEM) | (generated) |
+| `JWT_PUBLIC_KEY` | RS256 public key (PEM) | (generated) |
+| `JWT_EXPIRY_SECONDS` | JWT expiry | `900` |
+| `PSEUDONYMIZATION_KEY` | 32-byte hex for HMAC PII masking | (generated) |
+| `DB_ENCRYPTION_KEY` | pgcrypto column encryption | (generated) |
+| `FINNET_LIVE` | Enable real FINnet submission | `false` |
+| `NPCI_LIVE` | Enable real NPCI pre-settlement | `false` |
+| `DPDP_LIVE` | Enable DPDP erasure endpoint | `false` |
+| `GATE0_LIVE` | Promote Gate 0 from LOG to REVIEW | `false` |
+| `CISO_EMAIL` | CISO notification on fraud >₹10L | (email addr) |
+| `SLACK_WEBHOOK_URL` | SLA miss + security alerts | (webhook url) |
+| `ENSEMBLE_ALPHA` | XGBoost weight in ensemble | `0.65` |
+| `LOG_THRESHOLD` | Set after Phase 4 | `0.38` (current) |
+| `REVIEW_THRESHOLD` | Set after Phase 4 | `0.62` (current) |
+| `HIGH_RISK_THRESHOLD` | Set after Phase 4 | `0.83` (current) |
+| `PSI_ALERT_THRESHOLD` | PSI alert level | `0.2` |
+| `FTRL_CAP_PER_INVESTIGATOR` | Max FTRL updates per investigator/day | `15` |
+| `LEIDEN_DEPLOYED` | Flag for training pipeline | `false` |
+
 See `.env.example` for the template. Never commit `.env`.
 
 ## Context Files — Read On Demand
 
 | File | Read when... |
 |------|-------------|
+| `docs/IMPLEMENTATION_PLAN.md` | Starting any of the 48 changes — full cascade map here |
 | `agent_docs/architecture.md` | System design, new modules, major refactors |
 | `agent_docs/database.md` | Any DB query, schema change, migration |
 | `agent_docs/api.md` | Any endpoint work or integration |
 | `agent_docs/auth.md` | Auth, API keys, caller permissions |
 | `agent_docs/gotchas.md` | Something unexpected — READ THIS FIRST |
+| `.claude/agents/graph-engineer.md` | Any Neo4j, nightly batch, or gate work |
+| `.claude/agents/ml-engineer.md` | Any training, features, or calibration work |
 | `.claude/skills/deploy.md` | Before deploying |
 | `.claude/skills/seed.md` | Before seeding or resetting the DB |
 | `.claude/skills/migrate.md` | Before running or rolling back migrations |
