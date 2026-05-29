@@ -205,6 +205,11 @@ def run_nightly_feature_computation() -> None:
         leiden_deployed=leiden_ok,
     )
 
+    # PC-GNN + Hypergraph embedding generation — runs after Leiden features are in Redis
+    # so generate_embeddings() can load community_id for hyperedge construction.
+    # feat_dict is passed directly to avoid a second Redis round-trip.
+    _run_gnn_embedding(G, accounts)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-account feature assembly — field names MUST match feature_registry.py
@@ -638,5 +643,28 @@ def update_micro_batch_features() -> None:
             "outflow_1h": str(flows.get("outflow_1h", 0.0)),
         }
         r.hset(key, mapping=updates)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PC-GNN + Hypergraph embedding — called from run_nightly_feature_computation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_gnn_embedding(G, accounts: dict) -> None:
+    """
+    Run PC-GNN + Hypergraph after nightly batch writes feat:{account} to Redis.
+    Writes gnn_emb:{account} for every account in G.
+    Graceful: if torch/pyg not installed, logs warning and returns.
+    """
+    try:
+        from app.graph.gnn_embedder import generate_embeddings
+
+        # feat_dict: account_id → {field: value} from nightly batch (already in Redis)
+        # generate_embeddings fetches directly from Redis per account to avoid memory issues
+        count = generate_embeddings(G, feat_dict=None)
+        log.info("gnn_embeddings_complete", accounts_embedded=count)
+    except ImportError:
+        log.warning("gnn_embedding_skipped", reason="torch/torch-geometric not installed")
+    except Exception as exc:
+        log.warning("gnn_embedding_failed", error=str(exc))
 
     log.info("micro_batch_complete", accounts_updated=len(G.nodes()))

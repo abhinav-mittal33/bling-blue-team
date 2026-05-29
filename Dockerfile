@@ -7,7 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements-gnn.txt requirements.txt ./
+# GNN deps first (CPU-only torch — 250MB vs 2GB CUDA). Must precede requirements.txt
+# so pip sees torch already satisfied and skips the heavier PyPI wheel.
+RUN pip install --no-cache-dir -r requirements-gnn.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .

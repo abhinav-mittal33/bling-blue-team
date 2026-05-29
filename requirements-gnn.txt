@@ -1,0 +1,12 @@
+# GNN dependencies — PC-GNN + Hypergraph (Scorer B)
+# CPU-only build: ~250MB vs ~2.1GB for full CUDA torch
+#
+# Install order matters — torch must be installed before torch-geometric:
+#   pip install -r requirements-gnn.txt
+#   pip install -r requirements.txt
+#
+# Dockerfile handles this automatically (see multi-step pip install in Dockerfile).
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.1.0+cpu
+torch-geometric==2.5.3

@@ -65,19 +65,28 @@ def _load_scorer_b() -> None:
 
 def _fetch_embedding(account_id: str) -> tuple[Optional[np.ndarray], bool]:
     """
-    Fetch Node2Vec embedding from Redis emb:{account}.
-    Returns (embedding_array, missing_flag).
-    embedding is None if absent; missing_flag=True in that case.
+    Fetch account embedding from Redis.
+    Priority: gnn_emb:{account} (PC-GNN) → emb:{account} (Node2Vec) → missing_flag=True.
 
-    node2vec_runner.py stores with json.dumps(vec) + decode_responses=True Redis pool,
-    so raw is a JSON string like "[0.1, -0.2, ...]" — parse with json.loads, not fromhex.
+    PC-GNN embeddings (gnn_emb:) are richer — camouflage-resistant + hypergraph enriched.
+    Node2Vec (emb:) is the warm fallback when GNN hasn't run for this account yet.
+    Both stored as JSON strings by their respective runners.
     """
     try:
         import json
         r = get_redis()
-        raw = r.get(f"emb:{account_id}")
+
+        # Prefer PC-GNN embedding (gnn_emb:{account}) — written by gnn_embedder.py
+        raw = r.get(f"gnn_emb:{account_id}")
+        embedding_source = "pcgnn"
+        if raw is None:
+            # Fall back to Node2Vec embedding (emb:{account}) — written by node2vec_runner.py
+            raw = r.get(f"emb:{account_id}")
+            embedding_source = "node2vec"
+
         if raw is None:
             return None, True
+
         vec_list = json.loads(raw)
         emb = np.array(vec_list, dtype=np.float32)
         if emb.shape[0] != settings.scorer_b_embedding_dim:
@@ -85,6 +94,7 @@ def _fetch_embedding(account_id: str) -> tuple[Optional[np.ndarray], bool]:
                 "scorer_b_embedding_dim_mismatch",
                 expected=settings.scorer_b_embedding_dim,
                 got=emb.shape[0],
+                source=embedding_source,
             )
             return None, True
         return emb, False

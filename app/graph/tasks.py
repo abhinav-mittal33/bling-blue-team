@@ -112,21 +112,21 @@ def check_dlq_depth():
 @celery_app.task(name="app.graph.tasks.refresh_gnn_embeddings_task")
 def refresh_gnn_embeddings_task():
     """
-    GNN embedding refresh — every 5 minutes.
-    Updates emb:{account} in Redis for accounts active in the last hour.
-    Scorer B uses these embeddings; stale embeddings degrade to missing_flag=True.
-    Sets scorer_b:emb_refresh_at key with 7200s TTL on success.
+    PC-GNN + Hypergraph embedding refresh — every 5 minutes.
+    Re-embeds accounts active in the last 60 minutes using gnn_embedder.refresh_recent_embeddings.
+    Scorer B prefers gnn_emb:{account}; falls back to Node2Vec emb:{account} if missing.
+    Sets scorer_b:emb_refresh_at with 7200s TTL on success.
     """
     try:
+        import time as _time
         from app.utils.redis_client import get_redis
-        from app.graph.precompute.node2vec_runner import refresh_recent_embeddings
+        from app.graph.gnn_embedder import refresh_recent_embeddings
         r = get_redis()
         updated = refresh_recent_embeddings(lookback_minutes=60)
-        import time
-        r.setex("scorer_b:emb_refresh_at", 7200, int(time.time()))
+        r.setex("scorer_b:emb_refresh_at", 7200, int(_time.time()))
         log.info("gnn_embedding_refresh_complete", accounts_updated=updated)
-    except AttributeError:
-        log.debug("gnn_refresh_skipped", reason="refresh_recent_embeddings_not_implemented")
+    except ImportError:
+        log.debug("gnn_refresh_skipped", reason="torch/torch-geometric not installed")
     except Exception as exc:
         log.error("gnn_embedding_refresh_failed", error=str(exc))
 
