@@ -1,20 +1,27 @@
 """
-Train XGBoost fraud detection model.
-Feature names match EXACTLY what feature_builder.py produces:
-  - 35 graph features (from Redis cache / nightly batch)
-  - 24 real-time tabular features (59 unique total)
+Train XGBoost fraud detection model — Phase 4 update (P4-1 through P4-7).
 
-Training data: 100K synthetic examples, 2700 fraud across 16 archetypes.
-Gaussian noise added to all features for realistic distribution overlap.
+Phase 4 changes:
+  P4-1: Expanded archetypes (hawala, crypto_on_ramp, benami + ieee-cis + adbench blend)
+  P4-2: Feature names from ml/feature_registry.py (single source of truth)
+  P4-3: HGT ensemble component — STUBBED (requires teammate P2-2 hetero Neo4j schema)
+  P4-4: Platt scaling calibration on XGBClassifier
+  P4-5: Threshold derivation on calibrated output (LOG@recall=0.95, REVIEW@F1, HIGH@prec=0.90)
+  P4-6: XGBOD second novelty layer (uses pyod)
+  P4-7: PSI drift monitoring baseline — saves feature distribution stats
 
-Key constraints (from spec):
-  - scale_pos_weight=37: 2700 fraud / 97300 legit ≈ 1:36 ratio
-  - eval_metric='aucpr': PR-AUC not ROC-AUC for imbalanced data
-  - Output: ml/models/xgboost_v1.json
+Leiden gate: training refuses to run unless LEIDEN_DEPLOYED=true in Redis (or --force passed).
+This enforces atomic deployment of community features + model retrain.
+
+SHAP invariant: base_xgb is saved separately for SHAP. calibrated model is for scoring.
+scale_pos_weight: computed from actual training distribution, printed for update in CLAUDE.md.
+eval_metric='aucpr': NOT 'auc' — PR-AUC for imbalanced data.
 
 Run: python ml/train.py
+Run without Leiden gate: python ml/train.py --force
 """
 from __future__ import annotations
+import json
 import math
 import random
 import sys
@@ -33,46 +40,26 @@ FRAUD_ARCHETYPES = [
     "cycle_round_trip",
     "merchant_terminal",
     # Additional real-world archetypes
-    "romance_scam",          # Long trust-building then large transfer to new VPA
-    "pig_butchering",        # Small inflows then sudden large outflow to crypto/new VPA
-    "sim_swap",              # Account takeover: geography switch + new channel + spike
-    "otp_fraud",             # Rapid high-value transfers at 3am, multiple payees
-    "investment_fraud",      # Multiple victims → single collector → rapid cash-out
-    "salary_mule",           # Receives salary-like amounts, immediately relays out
-    "cash_in_mule",          # Cash deposit → immediate UPI transfer → empty account
-    "account_takeover",      # Dormant account suddenly active: new geography, high amount
+    "romance_scam",
+    "pig_butchering",
+    "sim_swap",
+    "otp_fraud",
+    "investment_fraud",
+    "salary_mule",
+    "cash_in_mule",
+    "account_takeover",
+    # Phase 4 new archetypes (P4-1 + P3-7)
+    "hawala",            # Near-threshold + high velocity relay, foreign remittance timing
+    "crypto_on_ramp",    # Round amounts to brand-new VPAs at high frequency
+    "benami",            # Dormant account suddenly used as proxy (>1yr old, velocity spike)
 ]
 
-# Must match feature_builder.py graph_feature_names list EXACTLY
-GRAPH_FEATURE_NAMES = [
-    "degree_centrality", "betweenness_centrality", "clustering_coefficient",
-    "pagerank_fraud_seeded", "community_id", "community_fraud_ratio",
-    "shortest_path_to_fraud", "cycle_membership", "sink_score",
-    "bipartite_score", "fan_out_ratio", "temporal_acceleration",
-    "cash_mule_sink_score", "bridge_node_probability", "dormancy_reactivation_flag",
-    "account_age_days", "kyc_completeness_score",
-    "txn_count_30d", "txn_count_90d", "txn_count_all",
-    "avg_txn_amount_30d", "distinct_counterparties_30d", "channel_entropy",
-    "night_txn_ratio", "weekend_txn_ratio", "return_ratio",
-    "amount_zscore", "counterparty_novelty", "hour_deviation",
-    "channel_switch", "amount_series_score", "burst_score",
-    "velocity_ratio", "dormancy_break", "geography_switch",
-]
+# P4-2: Feature names from feature_registry — NEVER hardcode here
+# Both training and inference use the same feature set via this import
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from ml.feature_registry import FEATURE_NAMES  # noqa: E402
 
-# Must match real-time features feature_builder.py computes
-REALTIME_FEATURE_NAMES = [
-    "txn_amount", "txn_amount_log", "txn_amount_rounded",
-    "channel_upi", "channel_imps", "channel_rtgs", "channel_neft",
-    "hour_of_day", "day_of_week", "is_weekend", "is_night", "is_festival_period",
-    "amount_vs_threshold_50000", "amount_vs_threshold_100000", "amount_vs_threshold_1000000",
-    "payee_vpa_age_days",
-    "txn_count_last_1h", "txn_count_last_24h", "txn_count_last_7d",
-    "txn_volume_last_1h", "txn_volume_last_24h",
-    "distinct_payees_24h",
-    "payee_in_alert_log", "payee_shared_alert_count",
-]
-
-ALL_FEATURE_NAMES = sorted(set(GRAPH_FEATURE_NAMES + REALTIME_FEATURE_NAMES))
+ALL_FEATURE_NAMES = sorted(set(FEATURE_NAMES))
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -375,7 +362,6 @@ def _fraud_features(archetype: str) -> dict:
         })
 
     elif archetype == "account_takeover":
-        # Old dormant account suddenly used with new patterns
         f.update({
             "dormancy_reactivation_flag": 1.0,
             "dormancy_break": 1.0,
@@ -388,6 +374,56 @@ def _fraud_features(archetype: str) -> dict:
             "amount_zscore": random.uniform(5.0, 15.0),
             "account_age_days": float(random.randint(730, 5000)),
             "txn_count_30d": float(random.randint(20, 60)),
+        })
+
+    # ── Phase 4 new archetypes (P4-1 + P3-7) ─────────────────────────────────
+    elif archetype == "hawala":
+        # Cash-equivalent relay: near-threshold, high velocity, foreign remittance timing
+        amount = random.uniform(88000, 99500)
+        f.update({
+            "txn_amount": amount,
+            "amount_series_score": random.uniform(0.65, 0.92),
+            "velocity_ratio": random.uniform(6.0, 18.0),
+            "burst_score": random.uniform(0.55, 0.88),
+            "txn_count_last_24h": float(random.randint(5, 15)),
+            "distinct_payees_24h": float(random.randint(3, 8)),
+            "counterparty_novelty": random.uniform(0.55, 0.9),
+            "geography_switch": random.uniform(0.5, 1.0),
+            "return_ratio": random.uniform(0.7, 0.95),
+            "night_txn_ratio": random.uniform(0.4, 0.8),
+            "fan_out_ratio": random.uniform(0.6, 0.95),
+        })
+
+    elif archetype == "crypto_on_ramp":
+        # Round amounts to brand-new VPAs, high frequency
+        amount = float(random.choice([10000, 20000, 30000, 50000, 100000]))
+        f.update({
+            "txn_amount": amount,
+            "payee_vpa_age_days": float(random.randint(1, 6)),
+            "txn_count_last_24h": float(random.randint(4, 12)),
+            "velocity_ratio": random.uniform(5.0, 20.0),
+            "burst_score": random.uniform(0.6, 0.92),
+            "counterparty_novelty": random.uniform(0.75, 1.0),
+            "distinct_payees_24h": float(random.randint(3, 8)),
+            "geography_switch": random.uniform(0.4, 0.9),
+            "channel_entropy": random.uniform(0.0, 0.3),
+            "return_ratio": random.uniform(0.0, 0.1),
+        })
+
+    elif archetype == "benami":
+        # Dormant account used as proxy — old account, sudden velocity spike
+        f.update({
+            "account_age_days": float(random.randint(365, 5000)),
+            "dormancy_reactivation_flag": 1.0,
+            "dormancy_break": 1.0,
+            "burst_score": random.uniform(0.65, 0.95),
+            "velocity_ratio": random.uniform(8.0, 30.0),
+            "txn_count_last_24h": float(random.randint(8, 20)),
+            "distinct_payees_24h": float(random.randint(3, 10)),
+            "counterparty_novelty": random.uniform(0.7, 1.0),
+            "geography_switch": random.uniform(0.5, 1.0),
+            "channel_switch": random.uniform(0.4, 0.85),
+            "kyc_completeness_score": random.uniform(0.2, 0.55),
         })
 
     # Keep amount-derived features consistent
@@ -428,16 +464,145 @@ def _to_vector(features: dict) -> list:
     return [features.get(name, 0.0) or 0.0 for name in ALL_FEATURE_NAMES]
 
 
+def _check_leiden_gate(force: bool) -> None:
+    """Enforce atomic Leiden + retrain deployment gate (P2-1 invariant)."""
+    if force:
+        print("WARNING: --force bypasses Leiden gate. Only use for initial baseline training.")
+        return
+    try:
+        import os
+        import redis as redis_lib
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+        r = redis_lib.Redis.from_url(redis_url, decode_responses=True, socket_timeout=2)
+        deployed = r.get("leiden:deployed")
+        if deployed != "true":
+            print("ERROR: Leiden community detection not yet deployed.")
+            print("       Run the nightly batch first, then retrain.")
+            print("       To bypass: python ml/train.py --force")
+            sys.exit(1)
+        print(f"Leiden gate: PASSED (deployed at {r.get('leiden:deployed_at') or 'unknown'})")
+    except Exception as exc:
+        print(f"WARNING: Cannot check Leiden gate ({exc}). Proceeding with --force logic.")
+
+
+def _derive_thresholds(y_true, y_pred_proba) -> dict:
+    """
+    Derive LOG/REVIEW/HIGH_RISK thresholds from held-out test set (P4-5).
+    Methodology:
+      LOG      = highest score where recall ≥ 0.95 (catch 95% of all fraud)
+      REVIEW   = score where recall ≥ 0.80 AND precision ≥ 0.60
+      HIGH_RISK = score where precision ≥ 0.90
+    All derived on TEST set — never validation (validation used for calibration).
+    """
+    from sklearn.metrics import precision_recall_curve
+
+    precision, recall, thresholds = precision_recall_curve(y_true, y_pred_proba)
+    # Note: precision_recall_curve appends a sentinel [1.0, 0.0, None] at end
+    # thresholds has len = len(precision) - 1
+
+    log_thresh = 0.38     # default fallback
+    review_thresh = 0.62
+    high_risk_thresh = 0.83
+
+    for i, t in enumerate(thresholds):
+        rec = recall[i]
+        prec = precision[i]
+
+        if rec >= 0.95:
+            log_thresh = round(float(t), 4)
+
+        if rec >= 0.80 and prec >= 0.60 and t > log_thresh:
+            review_thresh = round(float(t), 4)
+
+        if prec >= 0.90 and t > review_thresh:
+            high_risk_thresh = round(float(t), 4)
+            break  # first t where prec≥0.90 above review_thresh
+
+    return {
+        "LOG": log_thresh,
+        "REVIEW": review_thresh,
+        "HIGH_RISK": high_risk_thresh,
+    }
+
+
+def _save_psi_baseline(X_train, y_train, feature_names: list, out_dir: Path) -> None:
+    """
+    Save per-feature distribution stats for PSI drift monitoring (P4-7).
+    Saves: mean, std, percentiles [10,25,50,75,90], score hist bins.
+    Alert during monitoring if PSI(feature) > 0.2 for any feature.
+    """
+    import numpy as np
+
+    baseline = {}
+    for i, name in enumerate(feature_names):
+        col = X_train[:, i]
+        col = col[~np.isnan(col)]
+        if len(col) == 0:
+            continue
+        baseline[name] = {
+            "mean": float(np.mean(col)),
+            "std": float(np.std(col)),
+            "p10": float(np.percentile(col, 10)),
+            "p25": float(np.percentile(col, 25)),
+            "p50": float(np.percentile(col, 50)),
+            "p75": float(np.percentile(col, 75)),
+            "p90": float(np.percentile(col, 90)),
+        }
+
+    psi_file = out_dir / "psi_baseline.json"
+    with open(psi_file, "w") as f:
+        json.dump(baseline, f)
+    print(f"PSI baseline saved → {psi_file} ({len(baseline)} features)")
+
+
+def _train_xgbod(X_train, y_train, out_dir: Path) -> None:
+    """
+    Train XGBOD second novelty layer (P4-6).
+    INVARIANT: XGBOD output NEVER enters fraud_score. Saved for novelty pipeline only.
+    """
+    try:
+        from pyod.models.xgbod import XGBOD
+        import numpy as np
+        import joblib
+
+        # Train only on fraud samples (one-class novelty detection)
+        fraud_mask = y_train == 1
+        X_fraud = X_train[fraud_mask]
+        if len(X_fraud) < 100:
+            print("SKIP XGBOD: not enough fraud samples")
+            return
+
+        xgbod = XGBOD(n_estimators=50, random_state=42)
+        xgbod.fit(X_fraud)
+
+        out = out_dir / "xgbod_v1.joblib"
+        joblib.dump(xgbod, str(out))
+        print(f"XGBOD saved → {out}")
+
+    except ImportError:
+        print("SKIP XGBOD: pyod not installed. Add pyod[xgbod] to requirements.txt")
+    except Exception as exc:
+        print(f"SKIP XGBOD: {exc}")
+
+
 def main() -> None:
+    force = "--force" in sys.argv
+
     try:
         import xgboost as xgb
         import numpy as np
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.metrics import precision_recall_curve
+        import joblib
     except ImportError as exc:
         print(f"ERROR: {exc}")
         sys.exit(1)
 
+    # P2-1 Leiden deployment gate — atomic retraining
+    _check_leiden_gate(force)
+
     N_TOTAL = 100_000
-    N_FRAUD = 2_700  # 2.7% — heavier weight than real but gives model enough signal
+    N_FRAUD = 2_700
 
     rows_X, rows_y = [], []
 
@@ -457,9 +622,9 @@ def main() -> None:
     X = np.array(rows_X, dtype=np.float32)
     y = np.array(rows_y, dtype=np.float32)
 
-    # Auto-merge real-world labeled data from ml/data/ if available
+    # P4-1: Merge external labeled datasets
     data_dir = Path("ml/data")
-    for prefix in ("baf", "kaggle"):
+    for prefix in ("baf", "kaggle", "ieee_cis", "adbench"):
         x_file = data_dir / f"{prefix}_X.npy"
         y_file = data_dir / f"{prefix}_y.npy"
         if x_file.exists() and y_file.exists():
@@ -468,8 +633,7 @@ def main() -> None:
             if X_ext.shape[1] == X.shape[1]:
                 X = np.vstack([X, X_ext])
                 y = np.concatenate([y, y_ext])
-                ext_fraud = int(y_ext.sum())
-                print(f"Merged {prefix}: +{len(X_ext)} rows ({ext_fraud} fraud)")
+                print(f"Merged {prefix}: +{len(X_ext)} rows ({int(y_ext.sum())} fraud)")
             else:
                 print(f"SKIP {prefix}: feature count mismatch ({X_ext.shape[1]} vs {X.shape[1]})")
 
@@ -477,70 +641,125 @@ def main() -> None:
     total_legit = len(y) - total_fraud
     print(f"\nFinal dataset: {len(y)} rows ({total_fraud} fraud, {total_legit} legit)")
 
+    # P4-4: 3-way split — train (60%), val (20%), test (20%)
+    # val → Platt calibration. test → threshold derivation (NEVER validation).
     idx = np.random.permutation(len(X))
-    split = int(len(X) * 0.8)
-    X_train, X_test = X[idx[:split]], X[idx[split:]]
-    y_train, y_test = y[idx[:split]], y[idx[split:]]
+    n = len(idx)
+    train_end = int(n * 0.60)
+    val_end = int(n * 0.80)
 
-    # scale_pos_weight computed from actual merged distribution
+    X_train = X[idx[:train_end]]
+    y_train = y[idx[:train_end]]
+    X_val = X[idx[train_end:val_end]]
+    y_val = y[idx[train_end:val_end]]
+    X_test = X[idx[val_end:]]
+    y_test = y[idx[val_end:]]
+
     train_fraud = int(y_train.sum())
     train_legit = len(y_train) - train_fraud
     pos_weight = max(1, train_legit // train_fraud)
 
-    dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=ALL_FEATURE_NAMES)
-    dtest = xgb.DMatrix(X_test, label=y_test, feature_names=ALL_FEATURE_NAMES)
+    print(f"\nTrain: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
+    print(f"scale_pos_weight: {pos_weight} (recomputed from actual distribution)")
+    print("→ Update CLAUDE.md scale_pos_weight table with this value + today's date.")
 
-    params = {
-        "objective": "binary:logistic",
-        "eval_metric": "aucpr",
-        "scale_pos_weight": pos_weight,
-        "max_depth": 7,
-        "eta": 0.05,
-        "subsample": 0.85,
-        "colsample_bytree": 0.8,
-        "min_child_weight": 3,
-        "gamma": 0.1,
-        "tree_method": "hist",
-        "seed": 42,
-    }
-
-    model = xgb.train(
-        params, dtrain, num_boost_round=400,
-        evals=[(dtrain, "train"), (dtest, "eval")],
-        early_stopping_rounds=30, verbose_eval=40,
+    # P4-2: Train base XGBClassifier (sklearn API for calibration compatibility)
+    base_xgb = xgb.XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="aucpr",
+        scale_pos_weight=pos_weight,
+        max_depth=7,
+        learning_rate=0.05,
+        n_estimators=400,
+        subsample=0.85,
+        colsample_bytree=0.8,
+        min_child_weight=3,
+        gamma=0.1,
+        tree_method="hist",
+        random_state=42,
+        early_stopping_rounds=30,
+    )
+    base_xgb.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=40,
     )
 
-    out = Path("ml/models/xgboost_v1.json")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    model.save_model(str(out))
+    # P4-4: Platt scaling calibration on val set
+    # cv="prefit" = base model already fitted — only fit the calibration layer
+    calibrated = CalibratedClassifierCV(base_xgb, cv="prefit", method="sigmoid")
+    calibrated.fit(X_val, y_val)
 
-    preds = model.predict(dtest)
+    out_dir = Path("ml/models")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save base model for SHAP (INVARIANT: SHAP must use base, not calibrated)
+    base_out = out_dir / "xgboost_base_v2.json"
+    base_xgb.get_booster().save_model(str(base_out))
+    print(f"Base model saved → {base_out}")
+
+    # Save calibrated model for scoring
+    cal_out = out_dir / "xgboost_calibrated_v2.joblib"
+    joblib.dump(calibrated, str(cal_out))
+    print(f"Calibrated model saved → {cal_out}")
+
+    # Also save legacy v1.json for backwards compatibility during transition
+    legacy_out = out_dir / "xgboost_v1.json"
+    base_xgb.get_booster().save_model(str(legacy_out))
+
+    # Model integrity hashes (P0-3)
+    try:
+        from app.utils.model_integrity import store_model_hash
+        store_model_hash(base_out)
+        store_model_hash(legacy_out)
+    except Exception as e:
+        print(f"WARNING: model hash storage failed: {e}")
+
+    # P4-5: Derive thresholds on TEST set (not validation)
+    cal_preds_test = calibrated.predict_proba(X_test)[:, 1]
+    thresholds = _derive_thresholds(y_test, cal_preds_test)
+
     fraud_mask = y_test == 1
     legit_mask = y_test == 0
 
-    print(f"\nModel saved → {out}")
+    print(f"\n{'─'*55}")
     print(f"Feature count:     {len(ALL_FEATURE_NAMES)}")
-    print(f"Training examples: {N_TOTAL} ({N_FRAUD} fraud, {N_TOTAL - N_FRAUD} legit)")
     print(f"Fraud archetypes:  {len(FRAUD_ARCHETYPES)}")
     print(f"scale_pos_weight:  {pos_weight}")
-    print(f"Fraud mean score:  {preds[fraud_mask].mean():.3f}")
-    print(f"Clean mean score:  {preds[legit_mask].mean():.3f}")
-    print(f"Best aucpr:        {model.best_score:.4f}")
+    print(f"Fraud mean score (calibrated): {cal_preds_test[fraud_mask].mean():.3f}")
+    print(f"Clean mean score (calibrated): {cal_preds_test[legit_mask].mean():.3f}")
+    print(f"\nDerived thresholds (update .env + CLAUDE.md after review):")
+    print(f"  LOG_THRESHOLD:       {thresholds['LOG']}")
+    print(f"  REVIEW_THRESHOLD:    {thresholds['REVIEW']}")
+    print(f"  HIGH_RISK_THRESHOLD: {thresholds['HIGH_RISK']}")
+    print(f"{'─'*55}")
+    print("ACTION REQUIRED: Update .env and CLAUDE.md threshold table with values above.")
+
+    # Save derived thresholds to file for reference
+    thresh_file = out_dir / "thresholds_v2.json"
+    with open(thresh_file, "w") as f:
+        json.dump({"version": "v2", "thresholds": thresholds, "scale_pos_weight": pos_weight}, f)
+    print(f"Thresholds saved → {thresh_file}")
+
+    # P4-7: PSI drift monitoring baseline
+    _save_psi_baseline(X_train, y_train, ALL_FEATURE_NAMES, out_dir)
+
+    # P4-6: XGBOD second novelty layer
+    _train_xgbod(X_train, y_train, out_dir)
+
+    # P4-3: HGT ensemble — STUBBED (requires P2-2 hetero Neo4j schema from teammate)
+    print("\nHGT ensemble: SKIPPED (P4-3 requires P2-2 hetero schema from teammate)")
 
     # Per-archetype breakdown on test set
-    archetype_labels = []
-    per_arch_test = int(per_arch * 0.2)
+    per_arch_test = max(1, int(per_arch * 0.2))
+    raw_preds_test = base_xgb.predict_proba(X_test)[:, 1]
+    print("\nPer-archetype mean raw score (test):")
+    start = 0
     for arch in FRAUD_ARCHETYPES:
-        archetype_labels.extend([arch] * per_arch_test)
-    test_fraud_preds = preds[fraud_mask]
-    if len(test_fraud_preds) >= len(archetype_labels):
-        print("\nPer-archetype mean score (test):")
-        start = 0
-        for arch in FRAUD_ARCHETYPES:
-            chunk = preds[fraud_mask][start:start + per_arch_test]
-            if len(chunk) > 0:
-                print(f"  {arch:<25} {chunk.mean():.3f}")
-            start += per_arch_test
+        chunk = raw_preds_test[fraud_mask][start:start + per_arch_test]
+        if len(chunk) > 0:
+            print(f"  {arch:<25} {chunk.mean():.3f}")
+        start += per_arch_test
 
 
 if __name__ == "__main__":

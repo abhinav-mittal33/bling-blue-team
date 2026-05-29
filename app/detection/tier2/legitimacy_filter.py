@@ -68,12 +68,25 @@ def check_legitimacy_filters(
 
     # Filter 4: All-merchant settlement cycle
     # B2B payment chains — all intermediate nodes must be merchants
+    # P3-4: Shell company check — merchant with low KYC completeness is NOT a legit merchant
     if cycle_node_ids:
         node_details = get_cycle_node_details(cycle_node_ids)
         if node_details and all(n.get("is_merchant") for n in node_details):
-            logger.info("Cycle explained by merchant settlement", reason="merchant_settlement_cycle",
-                        node_count=len(node_details))
-            return {"explained": True, "reason": "merchant_settlement_cycle"}
+            # Shell company guard (P3-4): reject if any merchant has <30% KYC completeness
+            # or account age <90 days — shell companies won't survive this check
+            has_shell_company = any(
+                (float(n.get("kyc_completeness_score") or 0) < 0.30
+                 or int(n.get("account_age_days") or 0) < 90)
+                for n in node_details
+            )
+            if not has_shell_company:
+                logger.info("Cycle explained by merchant settlement", reason="merchant_settlement_cycle",
+                            node_count=len(node_details))
+                return {"explained": True, "reason": "merchant_settlement_cycle"}
+            else:
+                logger.warning("Shell company detected in merchant cycle",
+                               reason="shell_company_in_cycle",
+                               node_count=len(node_details))
 
     # Filter 5: Significant amount reduction
     # Legitimate cycles (fees, partial repayments) return <70% of sent amount

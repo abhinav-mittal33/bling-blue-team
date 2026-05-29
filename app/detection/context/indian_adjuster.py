@@ -19,6 +19,7 @@ def apply_indian_context(
     kyc_occupation: str | None,
     has_festival_gifting_history: bool = False,
     daily_txn_count: int = 0,
+    graph_staleness_hours: float | None = None,
 ) -> tuple[float, dict]:
     """
     Returns:
@@ -36,15 +37,24 @@ def apply_indian_context(
     adjustments: dict[str, float] = {}
     score = raw_score
 
-    # Festival season: Oct 1 – Nov 15 (Navratri + Diwali)
-    # Small gifts to new payees are normal during this period
-    if (is_festival
-            and txn_amount < 5_000
-            and has_festival_gifting_history
-            and payee_vpa_age_days is not None
-            and payee_vpa_age_days < 30):
-        adjustments["festival_gifting"] = 0.70
-        score *= 0.70
+    # Festival season: Oct 1 – Nov 15 (Navratri + Diwali) — 3-branch logic (P3-3)
+    if is_festival:
+        if (txn_amount < 5_000
+                and has_festival_gifting_history
+                and payee_vpa_age_days is not None
+                and payee_vpa_age_days < 30):
+            # Branch 1: small gift with known history → strong reduction
+            adjustments["festival_small_gift"] = 0.70
+            score *= 0.70
+        elif (5_000 <= txn_amount <= 50_000
+                and has_festival_gifting_history
+                and payee_vpa_age_days is not None
+                and payee_vpa_age_days > 7):
+            # Branch 2: medium gift to established payee → moderate reduction
+            adjustments["festival_medium_gift"] = 0.90
+            score *= 0.90
+        # Branch 3: large amounts (>50K) or new payees get NO festival reduction
+        # (large festival transfers to unknown VPAs remain high-risk)
 
     # Gig workers: high-frequency same-channel daytime transactions are normal
     if (daily_txn_count > 10
@@ -74,6 +84,15 @@ def apply_indian_context(
         if payee_vpa_age_days is not None and payee_vpa_age_days < 7:
             adjustments["senior_new_vpa_amplification"] = 1.30
             score *= 1.30
+
+    # Staleness penalty (P3-10 — requires P2-7 graph_staleness_hours)
+    # When graph features are >26h stale, shrink score toward 0.5 proportionally.
+    # Reduces false positives from actions taken on outdated graph topology.
+    if graph_staleness_hours is not None and graph_staleness_hours > 26:
+        staleness_excess_hours = min(graph_staleness_hours - 26, 72)  # cap at 72h excess
+        regression_factor = 1.0 - (staleness_excess_hours / 72) * 0.30  # max 30% regression
+        score = score * regression_factor + 0.5 * (1.0 - regression_factor)
+        adjustments["graph_staleness_penalty"] = round(regression_factor, 3)
 
     adjusted_score = min(score, 1.0)
     return adjusted_score, adjustments

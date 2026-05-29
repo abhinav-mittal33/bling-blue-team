@@ -17,8 +17,12 @@ services:
 
   redis:
     image: redis:7-alpine
+    # AOF persistence enabled (P1-3) — survives container restart without losing velocity/feature cache
+    command: redis-server --appendonly yes
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -78,8 +82,29 @@ services:
     volumes:
       - ./ml/models:/app/ml/models
 
+  # Celery Beat scheduler (P0-2) — replaces APScheduler
+  celery-beat:
+    build: .
+    command: celery -A app.celery_app beat --loglevel=info --scheduler=celery.beat:PersistentScheduler
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      POSTGRES_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB}
+      SALT: ${SALT}
+      MODEL_VERSION: ${MODEL_VERSION}
+    volumes:
+      - ./ml/models:/app/ml/models
+
   # Note: Neo4j NOT included — that is the Graph Engine (teammate's service)
   # Blue Team connects to Neo4j via NEO4J_URI environment variable
 
 volumes:
   postgres_data:
+  redis_data:

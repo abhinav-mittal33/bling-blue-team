@@ -1,11 +1,15 @@
 """
-Tier 3 feature builder.
-Assembles up to 87 features from Redis (pre-computed) + PostgreSQL (real-time).
-Returns a dict of feature_name -> float. Never makes scoring decisions.
-Missing features return float('nan') — XGBoost handles NaN natively.
+Tier 3 feature builder — Phase 2 update (P2-7, P2-8, P2-9).
+Assembles features from Redis (pre-computed) + PostgreSQL (real-time).
+Returns dict: feature_name → float. Missing features return float('nan').
+
+Feature order follows ml/feature_registry.py — NEVER hardcode the list here.
+XGBoost assigns features by position: feature order must be identical between
+training (train.py) and inference (here).
 """
 from __future__ import annotations
 import math
+import time
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -13,38 +17,42 @@ from sqlalchemy import text
 from app.utils.redis_client import get_graph_features
 from app.models.schemas import TransactionScoreRequest
 
+# Authoritative feature name list — import here, never hardcode
+from ml.feature_registry import GRAPH_FEATURES, REALTIME_FEATURES, PHASE2_GRAPH_FEATURES
+
 
 def build_features(txn: TransactionScoreRequest, db: Session) -> dict[str, float]:
     features: dict[str, float] = {}
 
-    # ── 35 pre-computed graph features from Redis ─────────────────────────────
+    # ── Pre-computed graph features from Redis ────────────────────────────────
     cached = get_graph_features(txn.account_id)
-    graph_feature_names = [
-        "degree_centrality", "betweenness_centrality", "clustering_coefficient",
-        "pagerank_fraud_seeded", "community_id", "community_fraud_ratio",
-        "shortest_path_to_fraud", "cycle_membership", "sink_score",
-        "bipartite_score", "fan_out_ratio", "temporal_acceleration",
-        "cash_mule_sink_score", "bridge_node_probability", "dormancy_reactivation_flag",
-        "account_age_days", "kyc_completeness_score",
-        "txn_count_30d", "txn_count_90d", "txn_count_all",
-        "avg_txn_amount_30d", "distinct_counterparties_30d", "channel_entropy",
-        "night_txn_ratio", "weekend_txn_ratio", "return_ratio",
-        "amount_zscore", "counterparty_novelty", "hour_deviation",
-        "channel_switch", "amount_series_score", "burst_score",
-        "velocity_ratio", "dormancy_break", "geography_switch",
-    ]
-    for name in graph_feature_names:
+
+    for name in GRAPH_FEATURES:
         val = cached.get(name)
         features[name] = float(val) if val is not None else float("nan")
 
-    # ── 52 real-time tabular features from PostgreSQL ─────────────────────────
+    # ── graph_staleness_hours (P2-7) ───────────────────────────────────────────
+    # Derived at scoring time from _last_updated field — not stored as a feature.
+    last_updated = cached.get("_last_updated")
+    if last_updated:
+        staleness_hours = (time.time() - float(last_updated)) / 3600
+    else:
+        staleness_hours = float("nan")
+    features["graph_staleness_hours"] = staleness_hours
 
+    # ── Phase 2 graph features from Redis (P2-7, P2-8, P2-9) ─────────────────
+    for name in PHASE2_GRAPH_FEATURES:
+        if name == "graph_staleness_hours":
+            continue  # Already computed above
+        val = cached.get(name)
+        features[name] = float(val) if val is not None else float("nan")
+
+    # ── Real-time tabular features from PostgreSQL ────────────────────────────
     amount = float(txn.amount)
     ts = txn.timestamp
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
 
-    # Transaction features
     features["txn_amount"] = amount
     features["txn_amount_log"] = math.log1p(amount)
     features["txn_amount_rounded"] = 1.0 if amount == round(amount, -3) else 0.0
@@ -62,11 +70,10 @@ def build_features(txn: TransactionScoreRequest, db: Session) -> dict[str, float
         (ts.month == 10) or (ts.month == 11 and ts.day <= 15)
     ) else 0.0
 
-    # Threshold proximity features
     for threshold in [50_000, 1_00_000, 10_00_000]:
         features[f"amount_vs_threshold_{threshold}"] = amount / threshold
 
-    # Payee age features
+    # Payee VPA age
     payee_vpa_age = float("nan")
     if txn.payee_vpa_created_at:
         vpa_ts = txn.payee_vpa_created_at
@@ -75,7 +82,7 @@ def build_features(txn: TransactionScoreRequest, db: Session) -> dict[str, float
         payee_vpa_age = max(0.0, (ts - vpa_ts).days)
     features["payee_vpa_age_days"] = payee_vpa_age
 
-    # Velocity features from PostgreSQL (last 1h, 24h, 7d)
+    # Velocity windows from PostgreSQL
     try:
         vel_rows = db.execute(
             text("""
@@ -120,4 +127,113 @@ def build_features(txn: TransactionScoreRequest, db: Session) -> dict[str, float
         features["payee_in_alert_log"] = float("nan")
         features["payee_shared_alert_count"] = float("nan")
 
+    # ── Phase 3 real-time features ────────────────────────────────────────────
+
+    # P3-5: Micro test payment flag — amount <₹2 to new VPA = mule setup signal
+    features["micro_test_payment"] = 1.0 if (
+        amount < 2.0
+        and not math.isnan(payee_vpa_age)
+        and payee_vpa_age < 7
+    ) else 0.0
+
+    # P3-6: Benford deviation — leading-digit deviation from Benford's law
+    features["benford_deviation"] = _compute_benford_deviation(txn.account_id, db)
+
+    # P3-9: Fan-in sender z-score — unusual concentration of incoming senders today
+    features["fan_in_sender_zscore"] = _compute_fan_in_zscore(txn.account_id, db)
+
     return features
+
+
+def _compute_benford_deviation(account_id: str, db) -> float:
+    """
+    Compute Benford's law deviation for last 90-day transaction amounts.
+    Returns 0.0 (no deviation) to 1.0 (max deviation). Missing → nan.
+    """
+    import math
+    try:
+        rows = db.execute(
+            text("""
+                SELECT amount FROM transactions
+                WHERE account_id = :account_id
+                AND timestamp > NOW() - INTERVAL '90 days'
+                AND amount > 0
+                LIMIT 200
+            """),
+            {"account_id": account_id},
+        ).fetchall()
+
+        if len(rows) < 20:
+            return float("nan")  # Not enough data for Benford analysis
+
+        # Expected Benford frequencies for digits 1-9
+        benford_expected = {d: math.log10(1 + 1 / d) for d in range(1, 10)}
+
+        # Actual leading digit frequencies
+        digit_counts = {d: 0 for d in range(1, 10)}
+        for row in rows:
+            s = str(abs(float(row[0]))).lstrip("0.")
+            if not s:
+                continue  # zero amount — no valid leading digit
+            leading = int(s[0])
+            if 1 <= leading <= 9:
+                digit_counts[leading] += 1
+
+        n = sum(digit_counts.values())
+        if n == 0:
+            return float("nan")
+
+        # Chi-squared-like deviation from Benford's distribution
+        deviation = sum(
+            abs((digit_counts[d] / n) - benford_expected[d])
+            for d in range(1, 10)
+        )
+        # Normalize to [0, 1]: max theoretical deviation is ~2.0
+        return min(deviation / 2.0, 1.0)
+
+    except Exception:
+        return float("nan")
+
+
+def _compute_fan_in_zscore(account_id: str, db) -> float:
+    """
+    Fan-in sender z-score: how many unique accounts sent money TO this account today
+    vs 90-day daily historical baseline. High positive = potential collector node.
+
+    Measures INCOMING senders (payee_account_id = this account), not outgoing.
+    Uses CTEs to avoid cross-join ambiguity between subqueries.
+    """
+    try:
+        result = db.execute(
+            text("""
+                WITH incoming_daily AS (
+                    SELECT DATE(timestamp) AS day,
+                           COUNT(DISTINCT account_id) AS daily_cnt
+                    FROM transactions
+                    WHERE payee_account_id = :account_id
+                      AND timestamp > NOW() - INTERVAL '90 days'
+                    GROUP BY DATE(timestamp)
+                ),
+                today AS (
+                    SELECT COUNT(DISTINCT account_id) AS senders_today
+                    FROM transactions
+                    WHERE payee_account_id = :account_id
+                      AND timestamp > NOW() - INTERVAL '24 hours'
+                )
+                SELECT
+                    today.senders_today,
+                    STDDEV(incoming_daily.daily_cnt) AS std_daily,
+                    AVG(incoming_daily.daily_cnt)    AS avg_daily
+                FROM incoming_daily, today
+            """),
+            {"account_id": account_id},
+        ).fetchone()
+
+        if not result or result.std_daily is None or float(result.std_daily or 0) == 0:
+            return float("nan")
+
+        zscore = (float(result.senders_today or 0) - float(result.avg_daily or 0)) / float(result.std_daily)
+        return round(zscore, 3)
+
+    except Exception:
+        return float("nan")

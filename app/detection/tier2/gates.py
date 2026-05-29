@@ -7,7 +7,7 @@ Gates return fired/not_fired + evidence only — no scoring decisions here.
 import structlog
 from sqlalchemy.orm import Session
 
-from app.detection.tier2 import cycle_gate, sink_gate, bipartite_gate, cash_mule_sink_gate, merchant_terminal_gate
+from app.detection.tier2 import cycle_gate, sink_gate, bipartite_gate, cash_mule_sink_gate, merchant_terminal_gate, rapid_relay_gate
 from app.core.security import pseudonymize
 
 logger = structlog.get_logger()
@@ -23,13 +23,15 @@ def run_all_gates(
     Returns first gate result that fired, or {'fired': False} if all clear.
 
     Gate order (most definitive → most novel):
+    0. Rapid relay gate — LOG-ONLY pilot (P3-2). GATE0_LIVE=false → does not escalate.
     1. Cycle gate       — round-trip = categorical fraud
-    2. Sink gate        — dormant accumulator
+    2. Sink gate        — dormant accumulator (includes D-01 two-path pattern)
     3. Bipartite gate   — mule network
     4. Cash mule sink   — receive → ATM → silence
     5. Merchant terminal — fake merchant / POS cashout
     """
     gates = [
+        ("rapid_relay", lambda: rapid_relay_gate.run(account_id)),
         ("cycle", lambda: cycle_gate.run(account_id)),
         ("sink", lambda: sink_gate.run(account_id)),
         ("bipartite", lambda: bipartite_gate.run(account_id)),

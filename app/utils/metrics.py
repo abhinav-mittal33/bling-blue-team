@@ -46,3 +46,21 @@ novelty_escalations_total = Counter(
     "bling_novelty_escalations_total",
     "Novel patterns escalated to Red Team (fingerprint seen 10+ times in 7 days)",
 )
+
+# Phase 0 — P0-2 Celery Beat metrics
+nightly_batch_duration_seconds = Histogram(
+    "bling_nightly_batch_duration_seconds",
+    "Nightly batch computation duration in seconds",
+    buckets=[60, 300, 600, 1200, 1800, 2700, 3600, 5400],
+)
+
+nightly_batch_failure_total = Counter(
+    "bling_nightly_batch_failure_total",
+    "Total nightly batch failures (triggers SLA alert)",
+)
+
+# Phase 1 — P1-1 Neo4j circuit breaker
+graph_fallback_total = Counter(
+    "bling_graph_fallback_total",
+    "Times Neo4j was unavailable and scoring fell back to stale Redis cache",
+)

@@ -108,3 +108,47 @@ def tier1_classify(
     # ── Everything else: not suspicious, not clearly clean ───────────────────
     # First-time payees, moderate amounts, new accounts → graph gate review
     return "UNCERTAIN", []
+
+
+def detect_archetypes(
+    txn: TransactionScoreRequest,
+    amount: float,
+    vel_24h: int,
+    account_age_days: int,
+    payee_account_age_days: int | None,
+    kyc_occupation: str | None,
+) -> list[str]:
+    """
+    Identify fraud archetype patterns for investigator context (P3-7).
+    Returns list of archetype labels. NEVER affects score or action — enrichment only.
+    Does NOT determine FAST_CLEAN/UNCERTAIN/SUSPICIOUS.
+
+    Archetypes:
+      hawala          — cash-equivalent relay pattern (near-threshold, high velocity, foreign remittance timing)
+      crypto_on_ramp  — potential crypto → fiat bridge (round amounts, high frequency to new VPAs)
+      benami          — shell proxy account (account with unusual transactions for declared occupation)
+    """
+    archetypes = []
+
+    # Hawala: transaction near threshold + high 24h velocity + non-business hours
+    if (_near_threshold(amount)
+            and vel_24h > 8
+            and kyc_occupation not in _HIGH_FREQUENCY_OCCUPATIONS):
+        archetypes.append("hawala")
+
+    # Crypto on-ramp: very round amounts to brand-new VPAs at high frequency
+    if (amount >= 10_000
+            and amount == round(amount, -4)  # rounded to nearest 10K
+            and payee_account_age_days is not None
+            and payee_account_age_days < 7
+            and vel_24h > 5):
+        archetypes.append("crypto_on_ramp")
+
+    # Benami: account age >1 year but suddenly extremely high velocity
+    # (dormant account suddenly used as proxy)
+    if (account_age_days > 365
+            and vel_24h > 15
+            and kyc_occupation not in _HIGH_FREQUENCY_OCCUPATIONS):
+        archetypes.append("benami")
+
+    return archetypes

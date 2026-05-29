@@ -131,6 +131,7 @@ class AlertResponse(BaseModel):
     layer_breakdown: Optional[LayerBreakdown] = None
     indian_context_applied: Optional[IndianContextApplied] = None
     str_draft: Optional[STRDraft] = None
+    committee_breakdown: Optional[dict] = None   # Phase 4: shadow committee scores per scorer
     created_at: str
 
 

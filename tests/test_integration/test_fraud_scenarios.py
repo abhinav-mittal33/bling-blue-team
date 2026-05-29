@@ -85,7 +85,7 @@ def test_rapid_layering():
         account_type="SAVINGS",
         daily_txn_count=8,
         has_festival_gifting_history=False,
-        _mock_score=(0.88, {"top_features": []}),
+        _mock_score=0.88,
     )
 
     assert result["action"] in ("REVIEW", "HIGH_RISK"), (
@@ -118,7 +118,7 @@ def test_low_slow_mule():
         account_type="SAVINGS",
         daily_txn_count=1,
         has_festival_gifting_history=False,
-        _mock_score=(0.75, {"top_features": []}),
+        _mock_score=0.75,
     )
 
     assert result["action"] in ("REVIEW", "HIGH_RISK"), (
@@ -149,7 +149,7 @@ def test_festival_gifting_false_positive():
         account_type="SAVINGS",
         daily_txn_count=4,
         has_festival_gifting_history=True,
-        _mock_score=(0.45, {"top_features": []}),
+        _mock_score=0.45,
     )
 
     assert result["action"] not in ("REVIEW", "HIGH_RISK"), (
@@ -182,7 +182,7 @@ def test_digital_arrest():
         daily_txn_count=1,
         has_festival_gifting_history=False,
         # Raw score just below HIGH_RISK, context amplifier pushes it over
-        _mock_score=(0.72, {"top_features": []}),
+        _mock_score=0.72,
     )
 
     assert result["action"] in ("REVIEW", "HIGH_RISK"), (
@@ -250,7 +250,7 @@ def test_structuring_below_threshold():
         account_type="CURRENT",
         daily_txn_count=5,
         has_festival_gifting_history=False,
-        _mock_score=(0.70, {"top_features": []}),
+        _mock_score=0.70,
     )
 
     assert result["action"] in ("REVIEW", "HIGH_RISK"), (
@@ -319,7 +319,7 @@ def test_legitimate_salary_cycle():
         account_type="SAVINGS",
         daily_txn_count=1,
         has_festival_gifting_history=False,
-        _mock_score=(0.25, {"top_features": []}),
+        _mock_score=0.25,
     )
 
     assert result["action"] in ("PASS", "LOG"), (

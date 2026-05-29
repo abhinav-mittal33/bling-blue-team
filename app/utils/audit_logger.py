@@ -32,6 +32,34 @@ def log_score_event(
         raise AuditWriteError(f"Audit write failed for txn {transaction_id}: {exc}") from exc
 
 
+def log_feedback_routing_event(
+    db: Session,
+    alert_id: str,
+    transaction_id: str,
+    route: str,
+    event_data: dict,
+) -> None:
+    """
+    Log structured feedback routing decision to model_audit.
+    Replaces log_ftrl_update. Raises AuditWriteError on failure.
+
+    route: 'FALSE_POSITIVE' | 'CONFIRMED_FRAUD'
+    event_data: serializable dict with fingerprint, label_source, etc.
+    """
+    try:
+        audit_row = ModelAudit(
+            event_type="FEEDBACK_ROUTING",
+            transaction_id=transaction_id,
+            model_version=settings.model_version,
+            event_data={"alert_id": alert_id, "route": route, **event_data},
+            event_timestamp=datetime.now(timezone.utc),
+        )
+        db.add(audit_row)
+        db.flush()  # caller commits with the full feedback transaction
+    except Exception as exc:
+        raise AuditWriteError(f"Feedback routing audit write failed for alert {alert_id}: {exc}") from exc
+
+
 def log_feedback_event(
     db: Session,
     alert_id: str,

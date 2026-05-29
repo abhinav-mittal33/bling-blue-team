@@ -1,16 +1,22 @@
-from __future__ import annotations
+
 """
 POST /api/v1/feedback
-Investigator submits verdict → triggers online learning + blockchain seal + red team notification.
+Investigator submits verdict → structured feedback routing + blockchain seal + red team notification.
 Auth: INVESTIGATOR_API_KEY only.
+
+River FTRL online learning removed (Phase 3). Feedback now routes to:
+  - confirmed_fraud  → prototype_injection_candidates + curated_dataset_queue (label=1)
+  - false_positive   → curated_dataset_queue (label=0) + reviewed_novelty_registry
 """
+import json
+import math
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-import json
 
 from app.api.deps import get_db
-from app.core.security import require_investigator_key
+from app.core.security import require_investigator_key, pseudonymize
 from app.core.exceptions import AuditWriteError
 from app.models.schemas import InvestigatorFeedbackRequest, FeedbackResponse
 from app.models.database import Alert, FraudScore, FeedbackLog
@@ -34,23 +40,46 @@ async def submit_feedback(
         FraudScore.transaction_id == alert.transaction_id
     ).first()
 
-    # 1. Online learning warm-start update
+    investigator_pseudo = pseudonymize(payload.investigator_id or "unknown")
+
+    # 1. Structured feedback routing (replaces FTRL — Phase 3)
     model_updated = False
-    if score_row and score_row.feature_vector:
+    if score_row:
         try:
-            from app.detection.tier3.online_learning import update_model
-            fv = (
-                json.loads(score_row.feature_vector)
-                if isinstance(score_row.feature_vector, str)
-                else score_row.feature_vector
+            from app.detection.feedback.feedback_router import (
+                route_false_positive, route_confirmed_fraud
             )
-            model_updated = update_model(
-                feature_vector=fv,
-                confirmed_fraud=payload.confirmed_fraud,
-                alert_id=payload.alert_id,
-            )
+            fv = {}
+            if score_row.feature_vector:
+                fv = (
+                    json.loads(score_row.feature_vector)
+                    if isinstance(score_row.feature_vector, str)
+                    else score_row.feature_vector
+                ) or {}
+
+            if payload.confirmed_fraud:
+                route_confirmed_fraud(
+                    alert_id=payload.alert_id,
+                    transaction_id=alert.transaction_id,
+                    investigator_id_hash=investigator_pseudo,
+                    feature_vector=fv,
+                    fraud_type=payload.fraud_type,
+                    notes=payload.notes,
+                    db=db,
+                )
+            else:
+                route_false_positive(
+                    alert_id=payload.alert_id,
+                    transaction_id=alert.transaction_id,
+                    investigator_id_hash=investigator_pseudo,
+                    feature_vector=fv,
+                    db=db,
+                )
+            model_updated = True   # feedback routed successfully (replaces FTRL update flag)
+        except AuditWriteError:
+            raise   # audit failures propagate → 500
         except Exception as exc:
-            logger.error("Online learning update failed", alert_id=payload.alert_id, error=str(exc))
+            logger.error("feedback_routing_failed", alert_id=payload.alert_id, error=str(exc))
 
     # 2. Blockchain seal (async, best-effort)
     blockchain_sealed = False

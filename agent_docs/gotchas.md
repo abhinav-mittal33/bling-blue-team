@@ -182,3 +182,62 @@
 - Cause: Using time/amount features (hour_of_day, txn_amount) that vary legitimately
 - Fix: IF uses only the 17 structural graph features in `ISOLATION_FOREST_FEATURES`. Time and amount features explicitly excluded from both training and inference.
 - File: `app/detection/novelty/isolation_forest.py`, `ml/train_isolation_forest.py`
+
+---
+
+## Phase 2-4 New Gotchas (48 Changes)
+
+**nightly_batch.py field names don't match feature_builder.py — ALL graph features return NaN**
+- Symptom: XGBoost scoring works but all graph features (cycle_membership, pagerank_fraud_seeded etc) are NaN
+- Cause: `nightly_batch.py` writes `out_degree`, `hub_score`, `pagerank`. `feature_builder.py` reads `degree_centrality`, `pagerank_fraud_seeded`. Names don't match.
+- Fix: When rewriting nightly_batch.py for Leiden (Phase 2), align field names to match feature_builder.py exactly. Use `ml/feature_registry.py` as the authoritative field name list.
+- File: `app/graph/precompute/nightly_batch.py`, `app/detection/tier3/feature_builder.py`
+
+**Leiden + XGBoost retrain must deploy atomically**
+- Symptom: Fraud scores suddenly degrade or all score near 0.5 after deploying Leiden
+- Cause: community_id values from Leiden are completely different from Louvain. Old XGBoost trained on Louvain community_id values scores garbage when given Leiden values.
+- Fix: Never deploy Leiden-computed features while old XGBoost model runs. Deploy Leiden → set LEIDEN_DEPLOYED=true → retrain XGBoost → deploy new model together.
+- File: `app/graph/precompute/nightly_batch.py`, `ml/train.py`
+
+**CalibratedClassifierCV breaks SHAP TreeExplainer**
+- Symptom: `TypeError: predict_raw not available` or wrong SHAP values after Platt calibration
+- Cause: SHAP `TreeExplainer` only works on the base estimator, not the sklearn calibration wrapper
+- Fix: Keep TWO model references in app state: `calibrated_model` for scoring, `base_xgb_model` for SHAP. Extract base: `calibrator.calibrated_classifiers_[0].estimator`.
+- File: `app/detection/tier3/ensemble.py`, `ml/train.py`
+
+**Gate 0 conservation: NEVER use amounts[-1]**
+- Symptom: Gate 0 misses real rapid relay patterns or fires on legitimate aggregators
+- Cause: `amounts[-1]` represents only the most recent outflow. Real conservation requires ALL outflows vs ALL inflows.
+- Fix: `conservation = total_outflow / total_inflow` — always. Get both from full transaction history query.
+- File: `app/detection/tier2/rapid_relay_gate.py`
+
+**Indian context multipliers can push calibrated score above 1.0**
+- Symptom: fraud_score returns 1.05 or 1.12 for senior+night transactions
+- Cause: ×1.50 senior amplification * ×1.30 new VPA * calibrated 0.78 score = 1.52
+- Fix: `min(score, 1.0)` cap is already in `indian_adjuster.py` at line 78. Verify this cap still applies after adding granular festival logic. Never remove the cap.
+- File: `app/detection/context/indian_adjuster.py`
+
+**Feature order mismatch between training and scoring = silent garbage scores**
+- Symptom: Model scores every transaction near 0.5 or produces clearly wrong scores after adding new features
+- Cause: XGBoost assigns features by position when DMatrix is created. If training uses feature A in position 3 but scoring uses feature B in position 3, every prediction is wrong. No error is raised.
+- Fix: Both `train.py` and `feature_builder.py` MUST import `FEATURE_NAMES` from `ml/feature_registry.py`. NEVER hardcode feature lists in either file. Run `pytest tests/test_ml/test_feature_registry.py` after every feature change.
+- File: `ml/feature_registry.py`, `ml/train.py`, `app/detection/tier3/feature_builder.py`
+
+**FTRL updates in feedback.py require per-investigator cap**
+- Symptom: A single investigator can submit 100+ feedback events in one day and shift the online model severely
+- Cause: No rate cap on River FTRL updates per investigator
+- Fix: Redis counter `ftrl_count:{investigator_id}:{date}`. Exceed 15/day → skip River.learn(), log SECURITY_ALERT, still persist feedback_log.
+- File: `app/api/v1/feedback.py`
+
+**`from __future__ import annotations` breaks FastAPI route registration with Pydantic v2**
+- Symptom: `pydantic.errors.PydanticUndefinedAnnotation: name 'TransactionScoreRequest' is not defined` at import time
+- Cause: Pydantic v2 TypeAdapter evaluates annotation strings outside the module's __globals__. With `from __future__ import annotations`, all annotations become strings. FastAPI + Pydantic v2 can't resolve them during route decorator application.
+- Fix: Remove `from __future__ import annotations` from all FastAPI route handler files. Python 3.11 supports `str | None` union syntax natively — the import is not needed.
+- Files affected: `app/api/v1/score.py`, `app/api/v1/feedback.py`, `app/api/v1/alert.py`, `app/api/v1/novelty.py`
+- Note: The import is fine in non-route files (models, utils, detection logic). Only route handler files that FastAPI inspects at decoration time are affected.
+
+**Response time leaks gate path to timing oracle**
+- Symptom: Attacker queries /score 1000 times and identifies accounts that skip Tier 3 (faster ~20ms) vs take full path (~47ms)
+- Cause: Response time reveals which tier the transaction exited from
+- Fix: Pad all responses to TARGET_RESPONSE_MS=55ms using asyncio.sleep with the remainder.
+- File: `app/api/v1/score.py`

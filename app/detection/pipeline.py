@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """
 Main detection pipeline orchestrator.
 Tier 1 → Tier 2 → Tier 3 → action + evidence.
@@ -12,9 +13,9 @@ from app.models.schemas import TransactionScoreRequest
 from app.detection.tier1.heuristics import tier1_classify
 from app.detection.tier2.gates import run_all_gates
 from app.detection.tier3.feature_builder import build_features
-from app.detection.tier3.ensemble import score as tier3_score
+from app.detection.tier3.committee_scorer import tier3_committee_score
 from app.detection.context.indian_adjuster import apply_indian_context
-from app.detection.scoring.thresholds import score_to_action
+from app.detection.scoring.thresholds import score_to_action, is_canary_account, score_canary
 from app.core.security import pseudonymize
 
 logger = structlog.get_logger()
@@ -42,6 +43,18 @@ def run_pipeline(
     """
     t_start = time.monotonic()
     acct_pseudo = pseudonymize(txn.account_id)
+
+    # ── Canary account check (P6-1) ────────────────────────────────────────────
+    if is_canary_account(txn.account_id):
+        canary_score, canary_action = score_canary(txn.account_id)
+        logger.debug("canary_account_scored", account=acct_pseudo, score=canary_score)
+        return _result(
+            score=canary_score, action=canary_action, gate_fired=None,
+            tier1_flags=["canary"], tier2_gate=None,
+            tier3_score_raw=canary_score, shap_explanation=[],
+            indian_context_applied={},
+            processing_ms=_ms(t_start),
+        )
 
     # ── Tier 1: Fast heuristic classification ─────────────────────────────────
     tier1_result, tier1_flags = tier1_classify(
@@ -97,7 +110,8 @@ def run_pipeline(
 
     # ── Tier 3: ML ensemble (SUSPICIOUS only, gates cleared) ──────────────────
     features = build_features(txn, db)
-    raw_score, shap_features = tier3_score(features)
+    # SHAP removed from hot path (P1-6) — computed async by evidence.compute_shap task
+    raw_score = tier3_committee_score(features, txn, db)
 
     adjusted_score, context_adjustments = apply_indian_context(
         raw_score=raw_score,
@@ -110,16 +124,19 @@ def run_pipeline(
         kyc_occupation=kyc_occupation,
         has_festival_gifting_history=has_festival_gifting_history,
         daily_txn_count=daily_txn_count,
+        graph_staleness_hours=features.get("graph_staleness_hours"),
     )
 
-    action = score_to_action(adjusted_score)
+    # score_to_action returns (action, jittered_score) — both derived from the same
+    # jitter draw so the stored score and action decision are always consistent.
+    action, final_score = score_to_action(adjusted_score)
     logger.info("Tier3 complete", account=acct_pseudo,
                 raw=round(raw_score, 3), adjusted=round(adjusted_score, 3), action=action)
 
     return _result(
-        score=adjusted_score, action=action, gate_fired=None,
+        score=final_score, action=action, gate_fired=None,
         tier1_flags=tier1_flags, tier2_gate=None,
-        tier3_score_raw=raw_score, shap_explanation=shap_features,
+        tier3_score_raw=raw_score, shap_explanation=[],
         indian_context_applied=context_adjustments,
         processing_ms=_ms(t_start),
         feature_vector=features,

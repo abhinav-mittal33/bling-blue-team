@@ -20,7 +20,8 @@ neo4j==5.20.0
 # Redis / Celery
 redis==5.0.4
 celery==5.4.0
-APScheduler==3.10.4
+kombu==5.3.4
+# APScheduler removed — replaced by Celery Beat (P0-2)
 
 # ML
 xgboost==2.0.3
@@ -31,8 +32,26 @@ faiss-cpu==1.8.0
 pandas==2.2.2
 numpy==1.26.4
 
+# Retry / circuit breaker
+tenacity==8.3.0
+
 # Graph algorithms
 networkx==3.3
+joblib==1.4.2
+
+# Phase 2 graph layer (P2-1 Leiden, P2-6 Node2Vec)
+leidenalg==0.10.2
+igraph==0.11.6
+node2vec==0.4.6
+
+# Phase 4 (P4-4 calibration, P4-6 XGBOD novelty)
+pyod==2.0.2
+
+# Tier 3 committee upgrade (Phase 0+)
+mapie>=0.8.0                        # conformal calibration (Phase 2)
+sentence-transformers>=2.7.0        # Scorer F multilingual remark screener
+torch>=2.1.0                        # DeepSVDD anomaly discovery; future Mamba
+tabpfn>=2.0                         # Scorer C few-shot prototype classification
 
 # Observability
 structlog==24.1.0
@@ -41,6 +60,9 @@ prometheus-fastapi-instrumentator==7.0.0
 
 # Rate limiting
 slowapi==0.1.9
+
+# JWT RS256 auth (P1-7)
+PyJWT[crypto]==2.8.0
 
 # HTTP client (for integration clients)
 httpx==0.27.0
