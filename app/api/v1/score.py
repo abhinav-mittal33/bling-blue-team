@@ -118,6 +118,11 @@ async def score_transaction(
             reconstruct_fund_trail.delay(txn.transaction_id, alert_id)
         except Exception as exc:
             logger.error("Failed to queue trail reconstruction", alert_id=alert_id, error=str(exc))
+            try:
+                from app.utils.metrics import trail_queue_failures_total
+                trail_queue_failures_total.inc()
+            except Exception:
+                pass
 
     # Audit INSERT — must succeed before returning. Fail request if it fails.
     log_score_event(db, txn.transaction_id, {
@@ -159,7 +164,7 @@ async def score_transaction(
                 anomaly_score = discovery_ensemble.score(feature_vector)
                 if discovery_ensemble.is_novel(anomaly_score):
                     loop = asyncio.get_running_loop()
-                    loop.run_in_executor(
+                    _disc_fut = loop.run_in_executor(
                         None,
                         functools.partial(
                             route_discovery,
@@ -171,6 +176,11 @@ async def score_transaction(
                             gate_fired=gate_fired,
                             graph_features=feature_vector,
                         ),
+                    )
+                    # Log thread-level exceptions — outer try/except doesn't see them
+                    _disc_fut.add_done_callback(
+                        lambda f: logger.error("discovery_thread_error", error=str(f.exception()))
+                        if f.exception() else None
                     )
         except Exception as _disc_exc:
             # Discovery errors must NEVER affect the scoring response

@@ -100,8 +100,13 @@ def _route(
 
     r = get_redis()
     fp_key = f"novelty:fp:{fingerprint[:16]}"
-    current_count = int(r.incr(fp_key))
-    r.expire(fp_key, 86400 * 7)
+    # Atomic pipeline: incr + expire in one round-trip (non-atomic pair risks
+    # TTL never being set if process crashes between the two commands).
+    pipe = r.pipeline()
+    pipe.incr(fp_key)
+    pipe.expire(fp_key, 86400 * 7)
+    current_count, _ = pipe.execute()
+    current_count = int(current_count)
     requires_escalation = current_count >= ESCALATION_THRESHOLD
 
     with SessionLocal() as db:

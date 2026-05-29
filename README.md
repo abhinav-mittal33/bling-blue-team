@@ -6,6 +6,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![XGBoost](https://img.shields.io/badge/XGBoost-2.x-FF6600?style=flat-square)](https://xgboost.readthedocs.io)
+[![PyG](https://img.shields.io/badge/PyG-PC--GNN-EE4C2C?style=flat-square)](https://pyg.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-336791?style=flat-square&logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Redis](https://img.shields.io/badge/Redis-7.x-DC382D?style=flat-square&logo=redis&logoColor=white)](https://redis.io)
 [![Neo4j](https://img.shields.io/badge/Neo4j-5.x-008CC1?style=flat-square&logo=neo4j&logoColor=white)](https://neo4j.com)
@@ -86,7 +87,7 @@ flowchart LR
     F([Feature vector]) --> A & B & C & D & E
 
     A[Scorer A\nXGBoost GBM]
-    B[Scorer B\nGraph embedding\nNode2Vec 32-dim]
+    B[Scorer B\nPC-GNN + Hypergraph\n32-dim embedding]
     C[Scorer C\nPrototype vault\nFAISS k-NN]
     D[Scorer D\nSequence set RF]
     E[Scorer F\nRemark screener\nHindi + English]
@@ -155,12 +156,18 @@ cp .env.example .env
 alembic upgrade head
 
 # 4. Build committee engine assets
-python ml/scripts/build_phrase_dict.py
-python ml/scripts/build_initial_prototypes.py
+python ml/scripts/build_phrase_dict.py          # Scorer F — Hindi/English phrase embeddings
+python ml/scripts/build_initial_prototypes.py   # Scorer C — FAISS prototype vault
 
-# 5. Train models
-python ml/train.py
-python ml/train_isolation_forest.py
+# 5. Train all models (synthetic data — re-run after real data is available)
+python ml/train.py --force           # XGBoost base + Platt calibration
+python ml/train_scorer_a.py          # Scorer A GBM (113 features + UPI session)
+python ml/train_scorer_b.py          # Scorer B MLP (PC-GNN embedding + structural)
+python ml/train_scorer_d.py          # Scorer D RF (7 behavioral set features)
+python ml/train_ecod.py              # ECOD anomaly detector (PASS stream)
+python ml/train_xgbod.py             # XGBOD novelty layer (developer-only)
+python ml/train_isolation_forest.py  # IsoForest discovery (PASS stream)
+python ml/train_gnn.py --synthetic   # PC-GNN + Hypergraph embeddings → Redis gnn_emb:*
 
 # 6. Seed Redis and load demo data
 python scripts/seed_redis.py
@@ -231,7 +238,8 @@ Score includes ±0.01 jitter (anti-model-extraction). Action and score derive fr
 | Source | Features | Updated |
 |--------|----------|---------|
 | Redis `feat:{account}` — Leiden nightly | 35 graph features (PageRank, sink score, community, betweenness, multi-hop windows) | Nightly 3am |
-| Redis `emb:{account}` — Node2Vec nightly | 32-dim embedding vector | Nightly |
+| Redis `gnn_emb:{account}` — PC-GNN + Hypergraph | 32-dim camouflage-resistant embedding (Scorer B primary source) | Nightly + 5-min refresh |
+| Redis `emb:{account}` — Node2Vec | 32-dim embedding (Scorer B fallback when GNN not yet run for account) | Nightly |
 | Redis `feat:{account}` — Phase 2 additions | ~10 features (graph staleness, temporal windows, days since send/receive) | Nightly |
 | PostgreSQL — real-time | 24 tabular features (velocity, VPA age, payee alert history) | At scoring time |
 | Phase 3 real-time | 6 features (Benford deviation, fan-in z-score, micro test payment) | At scoring time |
@@ -307,7 +315,8 @@ Migrations: `001 → 002 → 003 → 004 → 005 → 006 → 007` (current head)
 | API | FastAPI 0.111 + Uvicorn |
 | ML scoring | XGBoost 2.x + Platt calibration + SHAP 0.44 |
 | Committee | 5-scorer committee engine (shadow mode) |
-| Graph features | Leiden community detection + Node2Vec |
+| Graph embedding | PC-GNN (camouflage-resistant) + Hypergraph layer (Leiden community hyperedges) |
+| Graph features | Leiden community detection + Node2Vec (fallback) |
 | Discovery | IsolationForest + ECOD (PASS stream only) |
 | Prototype vault | FAISS-cpu k-NN |
 | Primary DB | PostgreSQL 15 |
@@ -324,7 +333,7 @@ Migrations: `001 → 002 → 003 → 004 → 005 → 006 → 007` (current head)
 ## Core Invariants
 
 1. No automated blocking — investigators decide at every step
-2. Anomaly scores (IsoForest / ECOD / XGBOD) never enter `fraud_score` and are never shown to investigators
+2. Anomaly scores (IsoForest / ECOD / XGBOD) never enter `fraud_score` — never shown to investigators, developer novelty_queue only
 3. Gate 0 is LOG-ONLY until `GATE0_LIVE=true` after 2-week pilot review
 4. SHAP always runs on uncalibrated base XGBoost — never on `CalibratedClassifierCV`
 5. Leiden deployed flag is set only when `community_map` is non-empty
@@ -348,5 +357,5 @@ Migrations: `001 → 002 → 003 → 004 → 005 → 006 → 007` (current head)
 
 <div align="center">
 <b>BLING Hackathon · Blue Team · Union Bank of India</b><br>
-Post-transaction forensic fraud detection · 102+ tests · 7 migrations · ~107 features · 16+ archetypes
+Post-transaction forensic fraud detection · 102+ tests · 7 migrations · ~107 features · 19 archetypes · PC-GNN + Hypergraph GNN
 </div>

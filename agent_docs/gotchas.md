@@ -241,3 +241,75 @@
 - Cause: Response time reveals which tier the transaction exited from
 - Fix: Pad all responses to TARGET_RESPONSE_MS=55ms using asyncio.sleep with the remainder.
 - File: `app/api/v1/score.py`
+
+---
+
+## GNN / PC-GNN
+
+**gnn_emb: and emb: are two different Redis namespaces — don't mix**
+- Symptom: Scorer B always uses Node2Vec embeddings even after GNN training; PC-GNN camouflage resistance never active
+- Cause: Scorer B reads `gnn_emb:{account}` first (PC-GNN), falls back to `emb:{account}` (Node2Vec). If GNN not trained or Redis cleared, Node2Vec fallback silently kicks in — Scorer B still works but is weaker.
+- Fix: After running `ml/train_gnn.py`, verify: `redis-cli --scan --pattern "gnn_emb:*" | wc -l` — should be non-zero. If zero, GNN wrote to wrong Redis or Redis was cleared.
+- File: `app/detection/tier3/scorer_b.py`, `app/graph/gnn_embedder.py`
+
+**torch must not be imported at module level in gnn_embedder.py**
+- Symptom: API fails to start with `ModuleNotFoundError: No module named 'torch'` on deployments without torch installed
+- Cause: `import torch` at top of gnn_embedder.py — module-level import fails the entire app startup
+- Fix: ALL torch imports are inside function bodies in `gnn_embedder.py`. API starts cleanly without torch. GNN features degrade gracefully (missing_flag=True in Scorer B).
+- File: `app/graph/gnn_embedder.py`
+
+**Scorer B must be retrained after real GNN embeddings populate Redis**
+- Symptom: Scorer B ML model produces low-quality scores in production despite PC-GNN running
+- Cause: `scorer_b_v1.joblib` was trained on synthetic embeddings (random 32-dim vectors). Real PC-GNN embeddings have different distribution — model is miscalibrated.
+- Fix: After GNN training on real Neo4j data, rerun: `python ml/train_scorer_b.py`. The script auto-detects Redis availability and uses real embeddings.
+- File: `ml/train_scorer_b.py`
+
+---
+
+## ECOD / XGBOD
+
+**ECOD model is 114MB — exclude from zip and Docker layer cache**
+- Symptom: Docker build cache busts on every retraining; zip file becomes 120MB+
+- Cause: ECOD (Empirical Cumulative Distribution) stores entire training dataset internally for scoring — 50K samples × 59 features
+- Fix: Store `ecod_v1.joblib` in S3/GCS for production. Mount at container start. Gitignore already excludes it. Zip excludes with `--exclude "*/ml/models/ecod_v1.joblib"`.
+- File: `ml/train_ecod.py`, `app/detection/novelty/discovery_ensemble.py`
+
+**XGBOD with n_estimators=50 × 50K samples takes 90+ minutes on CPU**
+- Symptom: `python ml/train_xgbod.py` appears to hang with no output for >1 hour
+- Cause: XGBOD internally trains 50 XGBoost models sequentially. 50K samples × 59 features × 50 models = very slow on single CPU.
+- Fix: Default is now 5K samples / 5 estimators (completes in ~2 min). For production training: `XGBOD_FULL_TRAIN=1 python ml/train_xgbod.py` (use GPU machine or overnight run).
+- File: `ml/train_xgbod.py`
+
+---
+
+## Committee Engine
+
+**committee_shadow_mode and committee_live_mode cannot both be True**
+- Symptom: `ValueError: committee_shadow_mode and committee_live_mode cannot both be True` at startup
+- Cause: Settings validator enforces mutual exclusivity. Shadow = silently write scores. Live = replace XGBoost output.
+- Fix: Set exactly one of the two to True. Default is shadow_mode=True, live_mode=False.
+- File: `app/core/config.py`
+
+**shadow_writer failures must NEVER raise — verify this before adding new write paths**
+- Symptom: POST /score returns 500 for a DB outage that should only affect the shadow table
+- Cause: New code in shadow_writer.py raises instead of logging and returning
+- Fix: Every function in shadow_writer.py wraps its entire body in try/except. If it raises, it's a bug. Invariant: shadow failures affect observability only, not scoring.
+- File: `app/detection/tier3/shadow_writer.py`
+
+**Synthetic training thresholds (LOG=0.0002) are not production values**
+- Symptom: Every real transaction scores above LOG threshold and creates an alert
+- Cause: `ml/train.py --force` trained on synthetic data where fraud/legit are perfectly separable. Platt calibration pushed scores to 0.0 / 1.0 extremes. Threshold derivation set LOG at 0.0002 — the knee of a degenerate calibration curve.
+- Fix: After connecting real PostgreSQL and loading real transaction history, re-run `python ml/train.py --force` and update LOG_THRESHOLD / REVIEW_THRESHOLD / HIGH_RISK_THRESHOLD in `.env` with the new values from `ml/models/thresholds_v2.json`.
+- File: `ml/train.py`, `app/detection/scoring/thresholds.py`
+
+**Discovery executor Future exceptions are silently discarded without done_callback**
+- Symptom: `route_discovery()` crashes in background thread, no log, no metric, no trace
+- Cause: `loop.run_in_executor()` returns a Future. Exceptions in the thread are attached to the Future but never observed if nothing awaits it. Outer try/except does NOT catch them.
+- Fix: Already fixed in `score.py` — `_disc_fut.add_done_callback(lambda f: logger.error(...) if f.exception() else None)`. Never add run_in_executor calls without done_callbacks.
+- File: `app/api/v1/score.py`
+
+**Redis INCR + EXPIRE is not atomic — use pipeline**
+- Symptom: After process crash between incr and expire calls, fingerprint key lives forever with no TTL. Escalation counter grows unbounded across weeks and eventually triggers spurious Red Team escalation.
+- Cause: Two separate Redis commands are not atomic. A crash between them leaves the key without TTL.
+- Fix: Use `r.pipeline()` — execute both in one round-trip. Already fixed in `discovery_router.py`.
+- File: `app/detection/novelty/discovery_router.py`

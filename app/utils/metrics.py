@@ -64,3 +64,8 @@ graph_fallback_total = Counter(
     "bling_graph_fallback_total",
     "Times Neo4j was unavailable and scoring fell back to stale Redis cache",
 )
+
+trail_queue_failures_total = Counter(
+    "bling_trail_queue_failures_total",
+    "Times Celery fund trail reconstruction task failed to enqueue (Celery down)",
+)
