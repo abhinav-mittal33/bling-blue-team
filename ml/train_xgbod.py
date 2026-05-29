@@ -122,8 +122,12 @@ def main() -> None:
                   hint="pip install pyod==2.0.2  (already in requirements.txt)")
         sys.exit(1)
 
-    N_LEGIT = 50_000
-    N_NOVEL = 500
+    # Synthetic training: 5K samples (fast on CPU — takes ~2min vs 90min at 50K).
+    # Re-run on real data: N_LEGIT=50_000, N_NOVEL=500 (set via env var XGBOD_FULL_TRAIN=1).
+    import os as _os
+    _full = _os.getenv("XGBOD_FULL_TRAIN") == "1"
+    N_LEGIT = 50_000 if _full else 5_000
+    N_NOVEL = 500 if _full else 50
     N_TOTAL = N_LEGIT + N_NOVEL
 
     log.info("xgbod.generating_data",
@@ -147,16 +151,18 @@ def main() -> None:
     # Replace NaN / inf produced by edge cases in feature generation
     X = np.nan_to_num(X, nan=0.0, posinf=1e6, neginf=-1e6)
 
+    # n_estimators=50 for production; 5 for synthetic (5K samples fit in ~2min CPU).
+    n_est = 50 if _full else 5
     log.info("xgbod.fitting",
              shape=list(X.shape),
              n_labeled=int(y.sum()),
              contamination=0.01,
-             n_estimators=50)
+             n_estimators=n_est)
 
     # XGBOD is semi-supervised: it uses the weak labels (y) to guide
     # the ensemble of base detectors toward the novel pattern signal.
     # contamination=0.01 sets the decision boundary.
-    xgbod_model = XGBOD(n_estimators=50, contamination=0.01, random_state=42)
+    xgbod_model = XGBOD(n_estimators=n_est, contamination=0.01, random_state=42)
     xgbod_model.fit(X, y)
 
     # decision_scores_: higher = more anomalous (same convention as ECOD)
