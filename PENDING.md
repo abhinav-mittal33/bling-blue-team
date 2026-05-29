@@ -1,127 +1,270 @@
-# BLING Blue Team — Pending Actions
+# BLING Blue Team — Full Pending List
 
-Things you need to do manually, grouped by when to do them.
-Check each off as you complete it.
+Everything that still needs to be done, in priority order. Nothing omitted.
 
 ---
 
-## BEFORE THE HACKATHON DEMO
+## BEFORE DEMO — MUST DO
 
-### One-time setup (do in this order)
+### Setup (do once, in order)
 
-- [ ] **Copy `.env.example` → `.env` and fill in all values**
+- [ ] Copy `.env.example` → `.env` and fill ALL values
   ```bash
   cp .env.example .env
   ```
-  Required variables:
-  - `POSTGRES_URL`, `REDIS_URL`, `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`
-  - `GRAPH_ENGINE_API_KEY`, `INVESTIGATOR_API_KEY`, `INTERNAL_API_KEY`
-  - `SALT`, `PSEUDONYMIZATION_KEY` (32-byte hex), `DB_ENCRYPTION_KEY`
-  - `MODEL_VERSION`, `ENSEMBLE_ALPHA`
+  Required: `POSTGRES_URL`, `REDIS_URL`, `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`,
+  `GRAPH_ENGINE_API_KEY`, `INVESTIGATOR_API_KEY`, `INTERNAL_API_KEY`,
+  `SALT`, `PSEUDONYMIZATION_KEY` (32-byte hex), `MODEL_VERSION`
 
-  For JWT auth (optional in dev, required in production):
+- [ ] Generate JWT keys (optional in dev, required in production)
   ```bash
   openssl genrsa -out jwt_private.pem 2048
   openssl rsa -in jwt_private.pem -pubout -out jwt_public.pem
   ```
-  Then set `JWT_PRIVATE_KEY` and `JWT_PUBLIC_KEY` in `.env` (PEM content, one-liner with `\n`).
+  Set `JWT_PRIVATE_KEY` and `JWT_PUBLIC_KEY` in `.env`
 
-  Teammate-provided: `BLOCKCHAIN_SERVICE_URL`, `RED_TEAM_SERVICE_URL`, `INVESTIGATOR_DASHBOARD_URL`
-
-- [ ] **Start all infrastructure**
+- [ ] Start infrastructure
   ```bash
   docker-compose up -d
   ```
-  Wait ~30 seconds for PostgreSQL and Redis to be ready.
 
-- [ ] **Run ALL Alembic migrations** (creates all 7 migration sets including committee tables)
+- [ ] Run all migrations (001 → 007)
   ```bash
   alembic upgrade head
+  # verify: alembic current → should show 007 (head)
   ```
-  Verify: `alembic current` should show `007 (head)`
 
-- [ ] **Train the XGBoost model**
+- [ ] Train XGBoost model
   ```bash
   python ml/train.py
+  # output: ml/models/xgboost_v1.json + xgboost_calibrated_v2.joblib
   ```
-  Output: `ml/models/xgboost_v1.json` + calibrated `xgboost_calibrated_v2.joblib` (~2 minutes)
 
-- [ ] **Build committee engine assets (Scorer F phrase dict + Scorer C FAISS vault)**
+- [ ] Build Scorer F phrase dictionary (committee engine)
   ```bash
   python ml/scripts/build_phrase_dict.py
-  python ml/scripts/build_initial_prototypes.py
+  # output: ml/models/upi_fraud_phrases.json
   ```
-  These must run before the API starts — otherwise `prototype_vault_disabled` warning appears at startup.
 
-- [ ] **Train the discovery ensemble** (anomaly detection — PASS stream only)
+- [ ] Build Scorer C initial FAISS prototype vault
+  ```bash
+  python ml/scripts/build_initial_prototypes.py
+  # output: ml/models/prototype_faiss.index + prototype_meta.joblib
+  ```
+
+- [ ] Train discovery ensemble (anomaly detection, PASS stream only)
   ```bash
   python ml/train_isolation_forest.py
+  # output: ml/models/isolation_forest_v1.joblib
   ```
-  Output: `ml/models/isolation_forest_v1.joblib` (~30 seconds)
 
-- [ ] **Seed Redis graph features**
+- [ ] Seed Redis and load demo data
   ```bash
   python scripts/seed_redis.py
-  ```
-
-- [ ] **Load demo data**
-  ```bash
   python scripts/generate_test_data.py && python scripts/load_sample_data.py
   ```
 
-- [ ] **Run all tests (must pass before demo)**
+- [ ] Run all tests — must pass before demo
   ```bash
   pytest tests/ -v
+  # expect: 102+ passing
   ```
-  Expected: 102+ passing. All 8 fraud scenario integration tests must pass.
 
-- [ ] **Start Celery worker + beat scheduler** (separate terminal or Docker)
+- [ ] Start Celery worker + beat (separate terminal)
   ```bash
   celery -A app.celery_app worker -l info -Q default,evidence,graph
   celery -A app.celery_app beat -l info
   ```
 
-- [ ] **Start the API**
-  ```bash
-  uvicorn app.main:app --reload --port 8000
-  ```
+---
+
+## TEAMMATE COORDINATION
+
+- [ ] Get Neo4j bolt URL + credentials from Graph Engine teammate → set `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`
+- [ ] Get `BLOCKCHAIN_SERVICE_URL` from Blockchain teammate
+- [ ] Get `RED_TEAM_SERVICE_URL` from Red Team teammate
+- [ ] Get `INVESTIGATOR_DASHBOARD_URL` from Dashboard teammate
+- [ ] Share `GRAPH_ENGINE_API_KEY` with Graph Engine teammate
+- [ ] Share `INVESTIGATOR_API_KEY` with Investigator Dashboard teammate
+- [ ] Confirm POST /api/v1/score request schema with Graph Engine teammate
+- [ ] Confirm Neo4j schema includes `payee_vpa_created_at` on Transaction nodes (needed by D-01 gate)
+
+### BLOCKED ON TEAMMATE — GNN (most important future item)
+- [ ] **Graph Engine teammate must add Device + VPA nodes to Neo4j schema (P2-2)**
+  Current schema: `Account --[SENT]--> Account` only
+  Required: `Account --[USED]--> Device`, `Account --[HAS_VPA]--> VPA`
+  Nothing can be done on our side until this happens
+
+- [ ] After P2-2 done: add `torch>=2.1.0` + `torch-geometric` back to `requirements.txt`
+- [ ] After P2-2 done: write and run `ml/train_hgt.py` (HGT model — 3 node types, 3 edge types)
+- [ ] After P2-2 done: update Scorer B to use HGT embeddings instead of Node2Vec
+- [ ] After P2-2 done: retrain ensemble (P4-3 — thresholds change again after HGT added)
 
 ---
 
-## COORDINATE WITH TEAMMATES
+## FUNCTIONS THAT EXIST IN CODE BUT ARE NOT IMPLEMENTED YET
 
-- [ ] **Get teammate API URLs and add to `.env`**
-  - `BLOCKCHAIN_SERVICE_URL` — from Blockchain teammate
-  - `RED_TEAM_SERVICE_URL` — from Red Team teammate
-  - `INVESTIGATOR_DASHBOARD_URL` — from Dashboard teammate
-  - `NEO4J_URI` — from Graph Engine teammate (they own Neo4j)
+These are silently skipped right now via `AttributeError` catch — they will never crash, but the feature doesn't run.
 
-- [ ] **Share your API keys with teammates**
-  - Give Graph Engine team your `GRAPH_ENGINE_API_KEY`
-  - Give Investigator Dashboard team your `INVESTIGATOR_API_KEY`
-  - Keep `INTERNAL_API_KEY` to yourself (model admin + developer queue + testing only)
+- [ ] `update_betweenness_only()` in `nightly_batch.py`
+  Celery Beat calls it every 2h but function doesn't exist yet. Implement: approximate betweenness (k=500) for recently-active accounts only, partial Redis update.
 
-- [ ] **Confirm POST /api/v1/score request schema with Graph Engine**
-  Fields: `transaction_id`, `account_id`, `amount`, `channel`, `timestamp`, `payee_vpa`, `payee_vpa_created_at` (optional)
+- [ ] `update_micro_batch_features()` in `nightly_batch.py`
+  Celery Beat calls it every 5min but function doesn't exist. Implement: update `degree_centrality`, `temporal_acceleration`, `sink_score` from Neo4j micro-batch query.
 
-- [ ] **Confirm Neo4j connection** — ask Graph Engine teammate for bolt URL + credentials
+- [ ] `refresh_recent_embeddings(lookback_minutes=60)` in `node2vec_runner.py`
+  Called by `refresh_gnn_embeddings_task` every 5min but function doesn't exist. Implement: re-embed only accounts active in last 60min rather than full nightly re-run.
 
-- [ ] **Confirm Neo4j schema includes `payee_vpa_created_at` on Transaction nodes** (required by D-01 gate)
+- [ ] `payee_in_known_contacts` in `score.py` line 260
+  Currently hardcoded `False`. Wire to a real known-contacts table lookup.
+
+---
+
+## MODELS THAT STILL NEED TRAINING
+
+- [ ] Scorer A model (`scorer_a_v1.joblib`) — currently falls back to existing XGBoost
+  ```bash
+  python ml/train_scorer_a.py   # needs UPI session features in transaction schema first
+  ```
+
+- [ ] Scorer B model (`scorer_b_v1.joblib`) — embedding + structural context MLP
+  ```bash
+  python ml/train_scorer_b.py   # needs Node2Vec embeddings in Redis first
+  ```
+
+- [ ] ECOD discovery model (`ecod_v1.joblib`) — second anomaly detector
+  ```bash
+  python ml/train_ecod.py       # train on PASS-stream feature vectors
+  ```
+
+- [ ] XGBOD model (`xgbod_v1.joblib`) — P4-6 second novelty layer
+  Needs `ml/train_xgbod.py` to be written, then run
+
+- [ ] Meta-learner (`meta_learner_v1.joblib`) — committee stacking model
+  ```bash
+  python ml/train_meta_learner.py   # auto-aborts if fewer than 10,000 shadow rows
+  ```
+  Will not train until 10K SUSPICIOUS transactions have been scored in shadow mode
+
+- [ ] HGT model — blocked on teammate (see above)
+
+---
+
+## COMMITTEE ENGINE — PHASE GATES
+
+- [ ] **Accumulate shadow rows** — committee is in shadow mode, every SUSPICIOUS transaction writes one row. Need 10,000 rows before meta-learner can be trained.
+  Monitor: `SELECT COUNT(*) FROM shadow_score_committee`
+
+- [ ] **Train meta-learner** after 10K shadow rows (see Models above)
+
+- [ ] **Accumulate 50,000 shadow rows** before deriving new thresholds and going live
+
+- [ ] **Derive committee thresholds** after 50K shadow rows
+  ```bash
+  python ml/derive_committee_thresholds.py
+  # updates ml/models/committee_thresholds.json
+  # update LOG_THRESHOLD / REVIEW_THRESHOLD / HIGH_RISK_THRESHOLD in .env
+  ```
+  Warning fires if LOG threshold shifts more than 0.05 from current 0.38 — manual review required
+
+- [ ] **Validate committee performance** — meta-learner PR-AUC must beat existing XGBoost PR-AUC on held-out shadow validation
+
+- [ ] **Staging 48h run** — run `COMMITTEE_LIVE_MODE=true` on staging for 48h with zero incidents before touching production
+
+- [ ] **Flip committee live** — only after all above gates pass
+  Set `COMMITTEE_LIVE_MODE=true`, `COMMITTEE_SHADOW_MODE=false` in `.env`, restart
+
+---
+
+## GATE 0 — RAPID RELAY PILOT
+
+- [ ] Gate 0 is LOG-ONLY right now (`GATE0_LIVE=false`)
+- [ ] After 2 weeks of live traffic: review pilot logs — are the LOG flags legitimate relays or false positives?
+  ```bash
+  # check Gate 0 pilot logs
+  SELECT * FROM model_audit WHERE event_data->>'gate' = 'rapid_relay' LIMIT 100;
+  ```
+- [ ] If pilot looks good: set `GATE0_LIVE=true` in `.env` and restart to promote to REVIEW
+
+---
+
+## COMPLIANCE STUBS — NEED LIVE CREDENTIALS
+
+These exist in code but do nothing until credentials are provided.
+
+- [ ] **FINnet 2.0** — set `FINNET_LIVE=true` and `FINNET_API_KEY` in `.env`
+  STR drafts (156 fields) are generated and ready — just not submitted
+
+- [ ] **NPCI pre-settlement** — set `NPCI_LIVE=true` and `NPCI_API_KEY` in `.env`
+
+- [ ] **DPDP Act erasure** — set `DPDP_LIVE=true` to expose right-to-erasure endpoint
+  Erasure fields: `kyc_occupation`, `kyc_home_state`, `kyc_phone`, `kyc_email`
+
+- [ ] **OFAC / UN / MHA sanctions sync** — set live URLs in `.env`:
+  `OFAC_SDN_URL`, `UN_SANCTIONS_URL`, `MHA_SANCTIONS_URL`
+  Sync runs daily at 2:30am UTC — currently fetches empty lists because URLs are blank
+  Also: implement actual XML/CSV parsing in `sanctions_client._fetch_list()`
+
+- [ ] **CISO email alerts** — set in `.env`:
+  `CISO_EMAIL`, `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`
+  Fires when fraud amount exceeds ₹10L (HIGH_RISK). Currently logs only.
+
+---
+
+## SCORER D — MAMBA UPGRADE (future, not urgent)
+
+- [ ] Scorer D runs in limited mode (Random Forest over set features)
+- [ ] Full Mamba (state-space sequence model) needs ordered transaction history as input sequences
+- [ ] When ready: set `MAMBA_LIMITED_MODE=false` in `.env` and provide `ml/models/scorer_d_mamba_v1.pt`
+- [ ] Requires labeled sequence training data — not available yet
+
+---
+
+## INFRASTRUCTURE (production hardening)
+
+- [ ] **Run pip-audit before production deploy**
+  ```bash
+  pip-audit -r requirements.txt
+  ```
+
+- [ ] **Set up Grafana dashboard** — Prometheus metrics available at `/metrics`
+  Key metrics: `bling_scoring_requests_total`, `bling_alerts_created_total`, `bling_scoring_latency_ms`
+
+- [ ] **ML model storage** — currently volume-mounted from local disk. For cloud deployment, models need to be pulled from S3/GCS at container startup or baked into image at build time.
+
+- [ ] **PostgreSQL backups** — set up automated daily backups before production
+
+- [ ] **Redis persistence verification** — AOF is enabled. Verify `appendonly yes` is active in production Redis.
+
+- [ ] **Run load test** — locustfile exists at `tests/load/locustfile.py`
+  ```bash
+  locust -f tests/load/locustfile.py --headless -u 1000 -r 50 --run-time 5m
+  ```
+  Target: P99 latency ≤ 85ms under 1000 concurrent users
+
+- [ ] **PSI drift monitoring baseline** — P4-7. Run after initial production data accumulates to set baseline for population stability index alerts.
+
+- [ ] **Set `INTERNAL_API_KEY` to empty string in production** — dev/testing key only
+
+- [ ] **Flush FTRL Redis keys** (one-time, all environments)
+  ```bash
+  python scripts/flush_ftrl_redis.py
+  ```
 
 ---
 
 ## DEMO DAY CHECKLIST
 
-Run through this in order 30 minutes before the demo:
+Run 30 minutes before demo:
 
 ```bash
-# 1. Services running?
+# Services running?
 docker-compose ps
 
-# 2. API healthy?
+# API healthy?
 curl http://localhost:8000/health
 
-# 3. Score a high-risk transaction (should return HIGH_RISK)
+# Score a high-risk transaction — expect HIGH_RISK, score >= 0.83
 curl -X POST http://localhost:8000/api/v1/score \
   -H "X-API-Key: $GRAPH_ENGINE_API_KEY" \
   -H "Content-Type: application/json" \
@@ -130,13 +273,12 @@ curl -X POST http://localhost:8000/api/v1/score \
     "account_id": "ACC_FRAUD_001",
     "amount": "500000",
     "channel": "UPI",
-    "timestamp": "2026-05-16T02:14:00Z",
+    "timestamp": "2026-05-30T02:14:00Z",
     "payee_vpa": "scammer@upi",
-    "payee_vpa_created_at": "2026-05-14T10:00:00Z"
+    "payee_vpa_created_at": "2026-05-28T10:00:00Z"
   }'
-# Expect: action="HIGH_RISK", score >= 0.83
 
-# 4. Score a legit transaction (should return LOG or PASS)
+# Score a legit transaction — expect LOG or PASS
 curl -X POST http://localhost:8000/api/v1/score \
   -H "X-API-Key: $GRAPH_ENGINE_API_KEY" \
   -H "Content-Type: application/json" \
@@ -145,85 +287,45 @@ curl -X POST http://localhost:8000/api/v1/score \
     "account_id": "ACC_LEGIT_001",
     "amount": "25000",
     "channel": "NEFT",
-    "timestamp": "2026-05-16T11:00:00Z",
+    "timestamp": "2026-05-30T11:00:00Z",
     "payee_vpa": "employer@upi",
     "payee_vpa_created_at": "2024-01-01T00:00:00Z"
   }'
-# Expect: action="LOG" or "PASS", score < 0.62
 
-# 5. Check developer queue (novel fraud candidates)
-curl "http://localhost:8000/api/v1/developer-queue/prototype-candidates" \
+# Developer queue (novel fraud candidates)
+curl http://localhost:8000/api/v1/developer-queue/prototype-candidates \
   -H "X-API-Key: $INTERNAL_API_KEY"
 
-# 6. Metrics endpoint working?
+# Metrics working?
 curl http://localhost:8000/metrics | grep bling_
 
-# 7. API docs accessible?
+# Docs accessible?
 open http://localhost:8000/docs
 
-# 8. Run the 8 integration tests one more time
+# All 8 integration scenarios pass?
 pytest tests/test_integration/test_fraud_scenarios.py -v
 ```
 
 ---
 
-## PRODUCTION / POST-HACKATHON
+## TROUBLESHOOTING
 
-These are NOT needed for the hackathon demo:
-
-- [ ] **Set `INTERNAL_API_KEY` to empty string in production** — this key is for testing only
-- [ ] **Remove `docs_url` from FastAPI** — already disabled when `settings.debug=False`
-- [ ] **Derive post-Phase-4 thresholds** once ≥50K shadow rows collected:
-  ```bash
-  python ml/derive_committee_thresholds.py
-  ```
-  Update `LOG_THRESHOLD`, `REVIEW_THRESHOLD`, `HIGH_RISK_THRESHOLD` in `.env`.
-
-- [ ] **Train committee meta-learner** once ≥10K shadow rows collected:
-  ```bash
-  python ml/train_meta_learner.py
-  ```
-
-- [ ] **Gate 0 (rapid relay) go-live** — after 2-week pilot log review:
-  Set `GATE0_LIVE=true` in `.env` and restart API.
-
-- [ ] **Retrain discovery ensemble on real PASS-stream data** once shadow rows accumulate:
-  ```bash
-  python ml/train_ecod.py
-  ```
-
-- [ ] **P2-2 (Heterogeneous schema)** — requires teammate to add Device + VPA nodes in Neo4j. Then: train HGT ensemble component.
-
-- [ ] **Set up Grafana dashboard** — Prometheus metrics at `/metrics`
-  Key metrics: `bling_scoring_requests_total`, `bling_alerts_created_total`, `bling_scoring_latency_ms`
-
-- [ ] **Wire `payee_in_known_contacts` lookup** — currently hardcoded `False` in `score.py`. Wire to a real contacts table.
-
-- [ ] **FINnet 2.0 live submission** — STR draft generated (156 fields). Set `FINNET_LIVE=true` and configure `FINNET_API_KEY`.
-
-- [ ] **NPCI pre-settlement** — set `NPCI_LIVE=true` when integration ready.
-
-- [ ] **DPDP Act erasure endpoint** — set `DPDP_LIVE=true` to expose the right-to-erasure API.
+| Symptom | Fix |
+|---------|-----|
+| Score stuck at 0.4 for everything | `redis-cli HGETALL feat:ACC_FRAUD_001` — re-run `seed_redis.py` |
+| `prototype_vault_disabled` at startup | `python ml/scripts/build_initial_prototypes.py` |
+| `novelty_detection_disabled` at startup | `python ml/train_isolation_forest.py` |
+| XGBoost model not found | `python ml/train.py` |
+| POST /score returns 401 | `GRAPH_ENGINE_API_KEY` mismatch between caller and `.env` |
+| JWT 401 "not configured" | Set `JWT_PUBLIC_KEY` in `.env` or use X-API-Key |
+| D-01 gate fires on old accounts | Check `days_since_last_send` in `feat:{account}` Redis hash. Missing key = gate correctly stays silent. |
+| `leiden:deployed` not set | Leiden returned empty community map — check nightly batch logs |
+| Shadow committee not writing | Check `alembic current` = 007 and `COMMITTEE_SHADOW_MODE=true` |
+| Fund trail never arrives | Celery worker must use `-Q default,evidence,graph` — check `docker-compose.yml` |
+| `betweenness_update_skipped` in logs | Normal — `update_betweenness_only()` not yet implemented |
+| `micro_batch_skipped` in logs | Normal — `update_micro_batch_features()` not yet implemented |
+| `gnn_refresh_skipped` in logs | Normal — `refresh_recent_embeddings()` not yet implemented |
 
 ---
 
-## IF SOMETHING BREAKS
-
-| Symptom | First thing to check |
-|---------|---------------------|
-| Score stuck at 0.4/LOG for everything | `redis-cli HGETALL feat:ACC_FRAUD_001` — are graph features seeded? Re-run `seed_redis.py` |
-| `prototype_vault_disabled` at startup | Run `python ml/scripts/build_initial_prototypes.py` |
-| `novelty_detection_disabled` at startup | Run `python ml/train_isolation_forest.py` |
-| `alembic upgrade head` fails | Check `POSTGRES_URL` in `.env` and that postgres container is running |
-| XGBoost model not found | Run `python ml/train.py` — creates `ml/models/xgboost_v1.json` |
-| POST /score returns 401 | Check `GRAPH_ENGINE_API_KEY` matches between caller and `.env` |
-| JWT 401 "not configured" | Set `JWT_PUBLIC_KEY` in `.env`. Use X-API-Key for now. |
-| Celery trail reconstruction not starting | `docker-compose logs celery` — worker must be running |
-| D-01 gate fires on old accounts | Verify `days_since_last_send` key exists in `feat:{account}` Redis hash. If absent, D-01 correctly does NOT fire (missing data ≠ confirmed dormant). |
-| Leiden flag not set after nightly batch | Check `redis-cli GET leiden:deployed`. If absent, Leiden may have returned empty community map — check nightly batch logs. |
-| Shadow committee not writing rows | Check `committee_shadow_mode=true` in env and that `shadow_score_committee` table exists (`alembic current` must show 007). |
-| `model_integrity_check_failed` at startup | Run `ml/train.py` then `store_model_hash()` — or ignore on first run (model not yet trained). |
-
----
-
-*Updated 2026-05-29. Update as items are completed.*
+*Updated 2026-05-30. Check off items as completed.*
